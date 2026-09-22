@@ -17,15 +17,15 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/webp"
-	"winshot/internal/config"
-	"winshot/internal/hotkeys"
-	"winshot/internal/library"
-	"winshot/internal/overlay"
-	"winshot/internal/screenshot"
-	"winshot/internal/tray"
-	"winshot/internal/updater"
-	"winshot/internal/upload"
-	winEnum "winshot/internal/windows"
+	"linuxshot/internal/config"
+	"linuxshot/internal/hotkeys"
+	"linuxshot/internal/library"
+	"linuxshot/internal/overlay"
+	"linuxshot/internal/screenshot"
+	"linuxshot/internal/tray"
+	"linuxshot/internal/updater"
+	"linuxshot/internal/upload"
+	winEnum "linuxshot/internal/windows"
 )
 
 // Version is set at build time via ldflags
@@ -40,7 +40,7 @@ type App struct {
 	config           *config.Config
 	lastWidth        int
 	lastHeight       int
-	preCaptureWidth  int  // Window size before capture (protected from resize events)
+	preCaptureWidth  int // Window size before capture (protected from resize events)
 	preCaptureHeight int
 	preCaptureX      int  // Window X position before capture
 	preCaptureY      int  // Window Y position before capture
@@ -85,7 +85,7 @@ func (a *App) startup(ctx context.Context) {
 	}
 
 	// Initialize system tray with version in tooltip
-	a.trayIcon = tray.NewTrayIcon(fmt.Sprintf("WinShot v%s", Version))
+	a.trayIcon = tray.NewTrayIcon(fmt.Sprintf("LinuxShot v%s", Version))
 	a.trayIcon.SetCallback(a.onTrayMenu)
 	a.trayIcon.SetOnShow(func() {
 		runtime.WindowShow(a.ctx)
@@ -211,8 +211,8 @@ func (a *App) OnBeforeClose(ctx context.Context) bool {
 
 // VirtualScreenBounds represents the combined bounds of all monitors
 type VirtualScreenBounds struct {
-	X      int `json:"x"`      // Can be negative (monitor left of primary)
-	Y      int `json:"y"`      // Can be negative (monitor above primary)
+	X      int `json:"x"` // Can be negative (monitor left of primary)
+	Y      int `json:"y"` // Can be negative (monitor above primary)
 	Width  int `json:"width"`
 	Height int `json:"height"`
 }
@@ -383,7 +383,7 @@ func (a *App) CaptureDisplay(displayIndex int) (*screenshot.CaptureResult, error
 func (a *App) CaptureWindow(hwnd int) (*screenshot.CaptureResult, error) {
 	result, err := screenshot.CaptureWindowByCoords(uintptr(hwnd))
 
-	// Bring WinShot back to front after capture
+	// Bring LinuxShot back to front after capture
 	runtime.WindowShow(a.ctx)
 	runtime.WindowSetAlwaysOnTop(a.ctx, true)
 	time.Sleep(50 * time.Millisecond)
@@ -506,11 +506,7 @@ func (a *App) QuickSave(imageData string, format string) SaveImageResult {
 	// Get save directory from config (fallback to default)
 	saveDir := a.config.QuickSave.Folder
 	if saveDir == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return SaveImageResult{Success: false, Error: "Failed to get home directory: " + err.Error()}
-		}
-		saveDir = filepath.Join(homeDir, "Pictures", "WinShot")
+		saveDir = config.DefaultSaveFolder()
 	}
 
 	// Create save directory if it doesn't exist
@@ -538,14 +534,14 @@ func (a *App) QuickSave(imageData string, format string) SaveImageResult {
 
 	switch pattern {
 	case "date":
-		// Date only: winshot_2024-01-15.png
-		filename = "winshot_" + now.Format("2006-01-02") + ext
+		// Date only: linuxshot_2024-01-15.png
+		filename = "linuxshot_" + now.Format("2006-01-02") + ext
 		// Avoid overwriting: append counter if file exists
 		filePath := filepath.Join(saveDir, filename)
 		if _, err := os.Stat(filePath); err == nil {
 			counter := 1
 			for {
-				filename = "winshot_" + now.Format("2006-01-02") + "_" + fmt.Sprintf("%d", counter) + ext
+				filename = "linuxshot_" + now.Format("2006-01-02") + "_" + fmt.Sprintf("%d", counter) + ext
 				filePath = filepath.Join(saveDir, filename)
 				if _, err := os.Stat(filePath); os.IsNotExist(err) {
 					break
@@ -554,10 +550,10 @@ func (a *App) QuickSave(imageData string, format string) SaveImageResult {
 			}
 		}
 	case "increment":
-		// Incremental: winshot_001.png, winshot_002.png
+		// Incremental: linuxshot_001.png, linuxshot_002.png
 		counter := 1
 		for {
-			filename = fmt.Sprintf("winshot_%03d%s", counter, ext)
+			filename = fmt.Sprintf("linuxshot_%03d%s", counter, ext)
 			filePath := filepath.Join(saveDir, filename)
 			if _, err := os.Stat(filePath); os.IsNotExist(err) {
 				break
@@ -565,8 +561,8 @@ func (a *App) QuickSave(imageData string, format string) SaveImageResult {
 			counter++
 		}
 	default: // "timestamp"
-		// Full timestamp: winshot_2024-01-15_14-30-45.png
-		filename = "winshot_" + now.Format("2006-01-02_15-04-05") + ext
+		// Full timestamp: linuxshot_2024-01-15_14-30-45.png
+		filename = "linuxshot_" + now.Format("2006-01-02_15-04-05") + ext
 	}
 
 	filePath := filepath.Join(saveDir, filename)
@@ -951,11 +947,7 @@ func (a *App) GetLibraryImages() ([]library.LibraryImage, error) {
 	folder := a.config.QuickSave.Folder
 	if folder == "" {
 		// Fallback to default location
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get home directory: %w", err)
-		}
-		folder = filepath.Join(homeDir, "Pictures", "WinShot")
+		folder = config.DefaultSaveFolder()
 	}
 
 	opts := library.DefaultScanOptions()
@@ -968,8 +960,7 @@ func (a *App) OpenInEditor(imagePath string) (*screenshot.CaptureResult, error) 
 	// Validate path is within QuickSave folder (prevent directory traversal)
 	folder := a.config.QuickSave.Folder
 	if folder == "" {
-		homeDir, _ := os.UserHomeDir()
-		folder = filepath.Join(homeDir, "Pictures", "WinShot")
+		folder = config.DefaultSaveFolder()
 	}
 
 	absPath, err := filepath.Abs(imagePath)
@@ -1030,8 +1021,7 @@ func (a *App) DeleteScreenshot(imagePath string) error {
 	// Validate path is within QuickSave folder (prevent directory traversal)
 	folder := a.config.QuickSave.Folder
 	if folder == "" {
-		homeDir, _ := os.UserHomeDir()
-		folder = filepath.Join(homeDir, "Pictures", "WinShot")
+		folder = config.DefaultSaveFolder()
 	}
 
 	absPath, err := filepath.Abs(imagePath)

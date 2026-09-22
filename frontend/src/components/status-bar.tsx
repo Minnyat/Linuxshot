@@ -28,7 +28,7 @@ export function StatusBar({ screenshot, message }: StatusBarProps) {
         )}
       </span>
       <span className="flex items-center gap-3">
-        <span className="text-gradient font-semibold">WinShot v{__APP_VERSION__}</span>
+        <span className="text-gradient font-semibold">LinuxShot v{__APP_VERSION__}</span>
         <span className="text-slate-500">•</span>
         <a
           href="https://ClaudeKit.cc"

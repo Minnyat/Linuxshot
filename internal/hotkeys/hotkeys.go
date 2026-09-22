@@ -366,7 +366,7 @@ func (m *HotkeyManager) messageLoop(pendingHotkeys []*Hotkey) {
 	}
 }
 
-// RegisterDefaults registers the default hotkeys for WinShot
+// RegisterDefaults registers the default hotkeys for LinuxShot
 func (m *HotkeyManager) RegisterDefaults() error {
 	// Print Screen - Fullscreen capture
 	if err := m.Register(HotkeyFullscreen, 0, VK_SNAPSHOT); err != nil {

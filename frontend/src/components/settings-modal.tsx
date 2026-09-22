@@ -496,7 +496,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     value={localConfig.quickSave.folder}
                     readOnly
                     className="flex-1 px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-violet-500/50"
-                    placeholder="Default: Pictures/WinShot"
+                    placeholder="Default: Pictures/LinuxShot"
                   />
                   <button
                     onClick={handleSelectFolder}
@@ -524,9 +524,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   }
                   className="w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-slate-200 focus:outline-none focus:border-violet-500/50"
                 >
-                  <option value="timestamp">winshot_2024-12-01_15-30-45</option>
-                  <option value="date">winshot_2024-12-01</option>
-                  <option value="increment">winshot_001, winshot_002...</option>
+                  <option value="timestamp">linuxshot_2024-12-01_15-30-45</option>
+                  <option value="date">linuxshot_2024-12-01</option>
+                  <option value="increment">linuxshot_001, linuxshot_002...</option>
                 </select>
               </div>
             </div>
@@ -653,7 +653,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
               <div className="p-3 rounded-lg bg-white/5 border border-white/5">
                 <p className="text-sm text-slate-400">
-                  WinShot will notify you when a new version is available. Updates are downloaded from GitHub Releases as portable executables.
+                  LinuxShot will notify you when a new version is available. Updates are downloaded from GitHub Releases.
                 </p>
               </div>
             </div>

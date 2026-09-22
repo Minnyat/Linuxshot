@@ -7,7 +7,7 @@ interface TitleBarProps {
   onMinimize?: () => void;
 }
 
-export function TitleBar({ title = 'WinShot', onMinimize }: TitleBarProps) {
+export function TitleBar({ title = 'LinuxShot', onMinimize }: TitleBarProps) {
   const handleClose = async () => {
     try {
       const cfg = await GetConfig();

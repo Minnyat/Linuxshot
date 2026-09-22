@@ -170,12 +170,12 @@ func (g *GDriveUploader) handleCallback(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprint(w, `<!DOCTYPE html><html><head><title>WinShot - Authorization</title>
+	fmt.Fprint(w, `<!DOCTYPE html><html><head><title>LinuxShot - Authorization</title>
 <style>body{font-family:system-ui;text-align:center;padding-top:50px;background:#f5f5f5}
 .container{background:white;border-radius:8px;padding:40px;max-width:400px;margin:0 auto;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
 h1{color:#22c55e;margin-bottom:10px}p{color:#666}</style></head>
 <body><div class="container"><h1>Authorization Successful!</h1>
-<p>You can close this window and return to WinShot.</p></div>
+<p>You can close this window and return to LinuxShot.</p></div>
 <script>setTimeout(function(){window.close()},2000);</script></body></html>`)
 
 	g.authDone <- code

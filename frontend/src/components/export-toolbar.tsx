@@ -116,7 +116,7 @@ export function ExportToolbar({
                      border border-cyan-500/30 hover:border-cyan-500/50
                      text-cyan-300 hover:text-cyan-200
                      disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Quick Save to Pictures/WinShot (Ctrl+S)"
+          title="Quick Save to Pictures/LinuxShot (Ctrl+S)"
         >
           <Download className="w-4 h-4" />
           Quick Save
