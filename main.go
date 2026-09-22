@@ -37,9 +37,11 @@ func main() {
 	// Load config to get saved window size and startup settings
 	cfg, _ := config.Load()
 
-	// Sync startup registry path if startup is enabled (fixes duplicate app issue #61)
+	app := NewApp()
+
+	// Sync autostart path if startup is enabled (fixes duplicate app issue #61)
 	if cfg != nil && cfg.Startup.LaunchOnStartup {
-		_ = config.SyncStartupPath()
+		_ = app.platform.Autostart.SyncPath()
 	}
 	width := cfg.Window.Width
 	height := cfg.Window.Height
@@ -52,8 +54,6 @@ func main() {
 
 	// Check if app should start hidden (minimize to tray)
 	startHidden := cfg != nil && cfg.Startup.MinimizeToTray
-
-	app := NewApp()
 
 	err = wails.Run(&options.App{
 		Title:       "LinuxShot",

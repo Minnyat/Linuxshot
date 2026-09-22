@@ -18,14 +18,11 @@ import (
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/webp"
 	"linuxshot/internal/config"
-	"linuxshot/internal/hotkeys"
 	"linuxshot/internal/library"
-	"linuxshot/internal/overlay"
+	"linuxshot/internal/platform"
 	"linuxshot/internal/screenshot"
-	"linuxshot/internal/tray"
 	"linuxshot/internal/updater"
 	"linuxshot/internal/upload"
-	winEnum "linuxshot/internal/windows"
 )
 
 // Version is set at build time via ldflags
@@ -34,9 +31,7 @@ var Version = "dev"
 // App struct
 type App struct {
 	ctx              context.Context
-	hotkeyManager    *hotkeys.HotkeyManager
-	overlayManager   *overlay.Manager
-	trayIcon         *tray.TrayIcon
+	platform         *platform.Platform
 	config           *config.Config
 	lastWidth        int
 	lastHeight       int
@@ -55,7 +50,7 @@ type App struct {
 
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{}
+	return &App{platform: platform.New(fmt.Sprintf("LinuxShot v%s", Version))}
 }
 
 // startup is called when the app starts
@@ -69,31 +64,27 @@ func (a *App) startup(ctx context.Context) {
 	}
 	a.config = cfg
 
-	// Initialize hotkey manager
-	a.hotkeyManager = hotkeys.NewHotkeyManager()
-	a.hotkeyManager.SetCallback(a.onHotkey)
+	// Initialize global hotkeys
+	a.platform.Hotkeys.SetCallback(a.onHotkey)
 
 	// Register hotkeys from config
 	a.registerHotkeysFromConfig()
-	a.hotkeyManager.Start()
+	a.platform.Hotkeys.Start()
 
-	// Initialize overlay manager for native region selection
-	a.overlayManager = overlay.NewManager()
-	if err := a.overlayManager.Start(); err != nil {
-		// Log warning but continue - will fall back to React overlay
-		println("Warning: failed to start overlay manager:", err.Error())
+	// Initialize native region selection overlay (optional capability)
+	if a.platform.RegionSelector != nil {
+		if err := a.platform.RegionSelector.Start(); err != nil {
+			// Log warning but continue - will fall back to React overlay
+			println("Warning: failed to start overlay manager:", err.Error())
+		}
 	}
 
-	// Initialize system tray with version in tooltip
-	a.trayIcon = tray.NewTrayIcon(fmt.Sprintf("LinuxShot v%s", Version))
-	a.trayIcon.SetCallback(a.onTrayMenu)
-	a.trayIcon.SetOnShow(func() {
-		runtime.WindowShow(a.ctx)
-		a.isWindowHidden = false
-		runtime.WindowSetAlwaysOnTop(a.ctx, true)
-		runtime.WindowSetAlwaysOnTop(a.ctx, false)
-	})
-	a.trayIcon.Start()
+	// Initialize system tray (tooltip set in NewApp)
+	a.platform.Tray.SetCallback(a.onTrayMenu)
+	a.platform.Tray.SetOnShow(a.ShowWindow)
+	if err := a.platform.Tray.Start(); err != nil {
+		println("Warning: failed to start tray icon:", err.Error())
+	}
 
 	// Initialize window size tracking with config values
 	a.lastWidth = cfg.Window.Width
@@ -126,46 +117,42 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 
 	// Cleanup resources
-	if a.hotkeyManager != nil {
-		a.hotkeyManager.Stop()
-		a.hotkeyManager.UnregisterAll()
+	a.platform.Hotkeys.Stop()
+	a.platform.Hotkeys.UnregisterAll()
+	if a.platform.RegionSelector != nil {
+		a.platform.RegionSelector.Stop()
 	}
-	if a.overlayManager != nil {
-		a.overlayManager.Stop()
-	}
-	if a.trayIcon != nil {
-		a.trayIcon.Stop()
-	}
+	a.platform.Tray.Stop()
 }
 
 // onHotkey handles global hotkey events
-func (a *App) onHotkey(id int) {
+func (a *App) onHotkey(id platform.HotkeyID) {
 	switch id {
-	case hotkeys.HotkeyFullscreen:
+	case platform.HotkeyFullscreen:
 		runtime.EventsEmit(a.ctx, "hotkey:fullscreen")
-	case hotkeys.HotkeyRegion:
+	case platform.HotkeyRegion:
 		runtime.EventsEmit(a.ctx, "hotkey:region")
-	case hotkeys.HotkeyWindow:
+	case platform.HotkeyWindow:
 		runtime.EventsEmit(a.ctx, "hotkey:window")
 	}
 }
 
 // onTrayMenu handles tray menu selections
-func (a *App) onTrayMenu(menuID int) {
+func (a *App) onTrayMenu(menuID platform.TrayMenuID) {
 	switch menuID {
-	case tray.MenuFullscreen:
+	case platform.TrayFullscreen:
 		runtime.EventsEmit(a.ctx, "hotkey:fullscreen")
-	case tray.MenuRegion:
+	case platform.TrayRegion:
 		runtime.EventsEmit(a.ctx, "hotkey:region")
-	case tray.MenuWindow:
+	case platform.TrayWindow:
 		runtime.EventsEmit(a.ctx, "hotkey:window")
-	case tray.MenuLibrary:
+	case platform.TrayLibrary:
 		// Show main window first so library modal has context
 		runtime.WindowShow(a.ctx)
 		a.isWindowHidden = false
 		// Emit event to open library window
 		runtime.EventsEmit(a.ctx, "tray:library")
-	case tray.MenuQuit:
+	case platform.TrayQuit:
 		// Quit the application - use goroutine to avoid blocking tray menu
 		go func() {
 			// First try graceful shutdown via runtime.Quit
@@ -230,8 +217,12 @@ type RegionCaptureData struct {
 	DisplayIndex int                       `json:"displayIndex"` // Index of the captured display
 }
 
-// PrepareRegionCapture prepares for region selection using native Win32 overlay
+// PrepareRegionCapture prepares for region selection using the native overlay
 func (a *App) PrepareRegionCapture() (*RegionCaptureData, error) {
+	if a.platform.RegionSelector == nil {
+		return nil, fmt.Errorf("region capture: %w", platform.ErrUnsupported)
+	}
+
 	// Set capturing flag to prevent resize events from overwriting saved size
 	a.isCapturing = true
 
@@ -280,7 +271,7 @@ func (a *App) PrepareRegionCapture() (*RegionCaptureData, error) {
 
 	// Show native overlay and get result channel
 	bounds := image.Rect(screenX, screenY, screenX+virtualWidth, screenY+virtualHeight)
-	resultCh := a.overlayManager.Show(rgbaImg, bounds, scaleRatio)
+	resultCh := a.platform.RegionSelector.Show(rgbaImg, bounds, scaleRatio)
 
 	// Wait for selection result in goroutine
 	go func() {
@@ -366,7 +357,7 @@ func (a *App) ShowWindow() {
 
 // CaptureFullscreen captures the display where the cursor is currently located
 func (a *App) CaptureFullscreen() (*screenshot.CaptureResult, error) {
-	return screenshot.CaptureFullscreen()
+	return screenshot.CaptureDisplay(a.platform.Screen.MonitorAtCursor())
 }
 
 // CaptureRegion captures a specific region of the screen
@@ -381,7 +372,7 @@ func (a *App) CaptureDisplay(displayIndex int) (*screenshot.CaptureResult, error
 
 // CaptureWindow captures a specific window by handle
 func (a *App) CaptureWindow(hwnd int) (*screenshot.CaptureResult, error) {
-	result, err := screenshot.CaptureWindowByCoords(uintptr(hwnd))
+	result, err := a.platform.Screen.CaptureWindow(uint64(hwnd))
 
 	// Bring LinuxShot back to front after capture
 	runtime.WindowShow(a.ctx)
@@ -399,7 +390,7 @@ func (a *App) GetDisplayCount() int {
 
 // GetActiveDisplayIndex returns the index of the display where the cursor is located
 func (a *App) GetActiveDisplayIndex() int {
-	return screenshot.GetMonitorAtCursor()
+	return a.platform.Screen.MonitorAtCursor()
 }
 
 // GetVirtualScreenBounds returns the combined bounds of all monitors (virtual desktop)
@@ -428,19 +419,19 @@ func (a *App) GetDisplayBounds(displayIndex int) DisplayBounds {
 }
 
 // GetWindowList returns a list of all visible windows
-func (a *App) GetWindowList() ([]winEnum.WindowInfo, error) {
-	return winEnum.EnumWindows()
+func (a *App) GetWindowList() ([]platform.WindowInfo, error) {
+	return a.platform.Windows.List()
 }
 
 // GetWindowListWithThumbnails returns a list of all visible windows with thumbnails
-func (a *App) GetWindowListWithThumbnails() ([]winEnum.WindowInfoWithThumbnail, error) {
+func (a *App) GetWindowListWithThumbnails() ([]platform.WindowInfoWithThumbnail, error) {
 	// Use 160x120 for thumbnails (4:3 aspect, good balance of quality and speed)
-	return winEnum.EnumWindowsWithThumbnails(160, 120)
+	return a.platform.Windows.ListWithThumbnails(160, 120)
 }
 
 // GetWindowInfo returns information about a specific window
-func (a *App) GetWindowInfo(hwnd int) (*winEnum.WindowInfo, error) {
-	return winEnum.GetWindowInfo(uintptr(hwnd))
+func (a *App) GetWindowInfo(hwnd int) (*platform.WindowInfo, error) {
+	return a.platform.Windows.Info(uint64(hwnd))
 }
 
 // SaveImageResult represents the result of saving an image
@@ -606,7 +597,7 @@ func (a *App) GetConfig() *config.Config {
 func (a *App) SaveConfig(cfg *config.Config) error {
 	// Update startup setting if changed
 	if cfg.Startup.LaunchOnStartup != a.config.Startup.LaunchOnStartup {
-		if err := config.SetStartupEnabled(cfg.Startup.LaunchOnStartup); err != nil {
+		if err := a.platform.Autostart.SetEnabled(cfg.Startup.LaunchOnStartup); err != nil {
 			return err
 		}
 	}
@@ -626,7 +617,7 @@ func (a *App) SaveConfig(cfg *config.Config) error {
 
 	// Re-register hotkeys if they changed
 	if hotkeysChanged {
-		a.hotkeyManager.UnregisterAll()
+		a.platform.Hotkeys.UnregisterAll()
 		a.registerHotkeysFromConfig()
 	}
 
@@ -641,21 +632,11 @@ func (a *App) SelectFolder() (string, error) {
 }
 
 // registerHotkeysFromConfig registers hotkeys based on current config
+// Invalid or unsupported hotkeys are skipped, matching previous behavior.
 func (a *App) registerHotkeysFromConfig() {
-	// Parse and register fullscreen hotkey
-	if mods, key, ok := hotkeys.ParseHotkeyString(a.config.Hotkeys.Fullscreen); ok {
-		a.hotkeyManager.Register(hotkeys.HotkeyFullscreen, mods, key)
-	}
-
-	// Parse and register region hotkey
-	if mods, key, ok := hotkeys.ParseHotkeyString(a.config.Hotkeys.Region); ok {
-		a.hotkeyManager.Register(hotkeys.HotkeyRegion, mods, key)
-	}
-
-	// Parse and register window hotkey
-	if mods, key, ok := hotkeys.ParseHotkeyString(a.config.Hotkeys.Window); ok {
-		a.hotkeyManager.Register(hotkeys.HotkeyWindow, mods, key)
-	}
+	a.platform.Hotkeys.Register(platform.HotkeyFullscreen, a.config.Hotkeys.Fullscreen)
+	a.platform.Hotkeys.Register(platform.HotkeyRegion, a.config.Hotkeys.Region)
+	a.platform.Hotkeys.Register(platform.HotkeyWindow, a.config.Hotkeys.Window)
 }
 
 // GetBackgroundImages returns the list of saved background images (base64 data URLs)
@@ -744,9 +725,9 @@ func (a *App) OpenImage() (*screenshot.CaptureResult, error) {
 	}, nil
 }
 
-// GetClipboardImage reads an image from the Windows clipboard
+// GetClipboardImage reads an image from the system clipboard
 func (a *App) GetClipboardImage() (*screenshot.CaptureResult, error) {
-	return screenshot.GetClipboardImage()
+	return a.platform.Clipboard.Image()
 }
 
 // CheckForUpdate checks GitHub for a newer version

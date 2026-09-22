@@ -5,7 +5,7 @@ import {updater} from '../models';
 import {config} from '../models';
 import {main} from '../models';
 import {library} from '../models';
-import {windows} from '../models';
+import {platform} from '../models';
 import {upload} from '../models';
 
 export function CaptureDisplay(arg1:number):Promise<screenshot.CaptureResult>;
@@ -56,11 +56,11 @@ export function GetSkippedVersion():Promise<string>;
 
 export function GetVirtualScreenBounds():Promise<main.VirtualScreenBounds>;
 
-export function GetWindowInfo(arg1:number):Promise<windows.WindowInfo>;
+export function GetWindowInfo(arg1:number):Promise<platform.WindowInfo>;
 
-export function GetWindowList():Promise<Array<windows.WindowInfo>>;
+export function GetWindowList():Promise<Array<platform.WindowInfo>>;
 
-export function GetWindowListWithThumbnails():Promise<Array<windows.WindowInfoWithThumbnail>>;
+export function GetWindowListWithThumbnails():Promise<Array<platform.WindowInfoWithThumbnail>>;
 
 export function HasGDriveCredentials():Promise<boolean>;
 
