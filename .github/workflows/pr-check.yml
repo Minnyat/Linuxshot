@@ -4,9 +4,11 @@ on:
   pull_request:
     branches:
       - main
+      - dev
 
 jobs:
   validate-branch:
+    if: github.base_ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - name: Check source branch
@@ -27,3 +29,6 @@ jobs:
           fi
 
           echo "✓ Valid PR: dev -> main"
+
+  build:
+    uses: ./.github/workflows/build-linux.yml

@@ -11,8 +11,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  build:
-    runs-on: windows-latest
+  check:
+    runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
     steps:
@@ -24,86 +24,37 @@ jobs:
       - name: Check for releasable commits
         id: check
         run: |
-          $lastTag = git describe --tags --abbrev=0 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "No tags found, checking all commits"
-            # No tags yet, check all commits (include first-parent to see PR merges)
-            $commits = git log --oneline --first-parent
-          } else {
-            Write-Host "Last tag: $lastTag"
+          if last_tag=$(git describe --tags --abbrev=0 2>/dev/null); then
+            echo "Last tag: $last_tag"
             # Check commits since last tag (first-parent follows main branch history)
-            $commits = git log "$lastTag..HEAD" --oneline --first-parent
-          }
-          Write-Host "Commits to check:"
-          $commits | ForEach-Object { Write-Host "  $_" }
+            commits=$(git log "$last_tag..HEAD" --oneline --first-parent)
+          else
+            echo "No tags found, checking all commits"
+            # No tags yet, check all commits (include first-parent to see PR merges)
+            commits=$(git log --oneline --first-parent)
+          fi
+          echo "Commits to check:"
+          echo "$commits" | sed 's/^/  /'
           # Match conventional commits OR merge commits that mention feat/fix PRs
-          $hasReleasable = $commits | Where-Object {
-            $_ -match "^[a-f0-9]+ (feat|fix|perf|refactor)(\(.+\))?:" -or
-            $_ -match "Merge pull request.*from.*" -or
-            $_ -match "^[a-f0-9]+ Merge branch"
-          }
-          if ($hasReleasable) {
-            Write-Host "Found releasable commits:"
-            $hasReleasable | ForEach-Object { Write-Host "  $_" }
-            echo "should_release=true" >> $env:GITHUB_OUTPUT
-          } else {
-            Write-Host "No releasable commits found"
-            echo "should_release=false" >> $env:GITHUB_OUTPUT
-          }
-        shell: pwsh
+          releasable=$(echo "$commits" | grep -iE '^[a-f0-9]+ (feat|fix|perf|refactor)(\(.+\))?:|Merge pull request.*from.*|^[a-f0-9]+ Merge branch' || true)
+          if [ -n "$releasable" ]; then
+            echo "Found releasable commits:"
+            echo "$releasable" | sed 's/^/  /'
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No releasable commits found"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Setup Go
-        if: steps.check.outputs.should_release == 'true'
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.24"
-
-      - name: Setup Node.js
-        if: steps.check.outputs.should_release == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Wails CLI
-        if: steps.check.outputs.should_release == 'true'
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
-
-      - name: Clean and install frontend dependencies
-        if: steps.check.outputs.should_release == 'true'
-        run: |
-          cd frontend
-          if (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules }
-          npm install
-        shell: pwsh
-
-      - name: Get version from package.json
-        if: steps.check.outputs.should_release == 'true'
-        id: version
-        run: |
-          $version = (Get-Content package.json | ConvertFrom-Json).version
-          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
-        shell: pwsh
-
-      - name: Build portable executable
-        if: steps.check.outputs.should_release == 'true'
-        run: wails build -clean -platform windows/amd64 -ldflags "-X main.Version=${{ steps.version.outputs.VERSION }}"
-
-      - name: Build NSIS installer
-        if: steps.check.outputs.should_release == 'true'
-        run: wails build -platform windows/amd64 -nsis -ldflags "-X main.Version=${{ steps.version.outputs.VERSION }}"
-
-      - name: Upload build artifacts
-        if: steps.check.outputs.should_release == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: winshot-windows-beta
-          path: |
-            build/bin/winshot.exe
-            build/bin/winshot-amd64-installer.exe
+  build:
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      artifact-name: linuxshot-linux-beta
 
   release:
     needs: build
-    if: needs.build.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -123,7 +74,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: winshot-windows-beta
+          name: linuxshot-linux-beta
           path: build/bin
 
       - name: Semantic Release
