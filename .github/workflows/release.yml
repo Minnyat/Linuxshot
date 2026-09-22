@@ -1,83 +1,20 @@
 name: Production Release
 
+# Publishing is disabled until Phase 4 (AppImage/.deb): pushes only run the
+# Linux build check and upload the tarball as a workflow artifact.
+# To re-enable releases, revert the commit that added this comment (restores
+# the releasable-commit check, the semantic-release job and write permissions).
+
 on:
   push:
     branches:
       - main
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+  contents: read
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    outputs:
-      should_release: ${{ steps.check.outputs.should_release }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check for releasable commits
-        id: check
-        run: |
-          if last_tag=$(git describe --tags --abbrev=0 2>/dev/null); then
-            echo "Last tag: $last_tag"
-            # Check commits since last tag (first-parent follows main branch history)
-            commits=$(git log "$last_tag..HEAD" --oneline --first-parent)
-          else
-            echo "No tags found, checking all commits"
-            # No tags yet, check all commits (include first-parent to see PR merges)
-            commits=$(git log --oneline --first-parent)
-          fi
-          echo "Commits to check:"
-          echo "$commits" | sed 's/^/  /'
-          # Match conventional commits OR merge commits that mention feat/fix PRs
-          releasable=$(echo "$commits" | grep -iE '^[a-f0-9]+ (feat|fix|perf|refactor)(\(.+\))?:|Merge pull request.*from.*|^[a-f0-9]+ Merge branch' || true)
-          if [ -n "$releasable" ]; then
-            echo "Found releasable commits:"
-            echo "$releasable" | sed 's/^/  /'
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No releasable commits found"
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-          fi
-
   build:
-    needs: check
-    if: needs.check.outputs.should_release == 'true'
     uses: ./.github/workflows/build-linux.yml
     with:
       artifact-name: linuxshot-linux
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.PAT }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: linuxshot-linux
-          path: build/bin
-
-      - name: Semantic Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.PAT }}
-        run: npx semantic-release

@@ -53,3 +53,4 @@ tar -czf build/bin/linuxshot-linux-amd64.tar.gz -C build/bin linuxshot
 
 - Phase 2–3: real Linux hotkeys, tray, window capture/enumeration, clipboard, keyring, React region overlay.
 - Phase 4: AppImage/.deb packaging (the updater already prefers these assets), frontend refresh.
+- Publishing is disabled until Phase 4: pushes to `main`/`dev` only run the build check (tarball as a workflow artifact); no semantic-release, tag or GitHub release.
