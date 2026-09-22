@@ -74,8 +74,9 @@ func (a *App) startup(ctx context.Context) {
 	// Initialize native region selection overlay (optional capability)
 	if a.platform.RegionSelector != nil {
 		if err := a.platform.RegionSelector.Start(); err != nil {
-			// Log warning but continue - will fall back to React overlay
+			// Disable it so PrepareRegionCapture reports unsupported instead of waiting on a dead overlay
 			println("Warning: failed to start overlay manager:", err.Error())
+			a.platform.RegionSelector = nil
 		}
 	}
 
@@ -217,7 +218,8 @@ type RegionCaptureData struct {
 	DisplayIndex int                       `json:"displayIndex"` // Index of the captured display
 }
 
-// PrepareRegionCapture prepares for region selection using the native overlay
+// PrepareRegionCapture prepares for region selection using the native overlay.
+// Returns platform.ErrUnsupported when no native overlay is available (e.g. Linux).
 func (a *App) PrepareRegionCapture() (*RegionCaptureData, error) {
 	if a.platform.RegionSelector == nil {
 		return nil, fmt.Errorf("region capture: %w", platform.ErrUnsupported)
@@ -595,10 +597,13 @@ func (a *App) GetConfig() *config.Config {
 
 // SaveConfig saves the application configuration
 func (a *App) SaveConfig(cfg *config.Config) error {
-	// Update startup setting if changed
+	// Update startup setting if changed. On failure keep the previous value so
+	// the saved flag matches the OS state, but still save the other settings.
+	var autostartErr error
 	if cfg.Startup.LaunchOnStartup != a.config.Startup.LaunchOnStartup {
 		if err := a.platform.Autostart.SetEnabled(cfg.Startup.LaunchOnStartup); err != nil {
-			return err
+			autostartErr = fmt.Errorf("settings saved, but launch on startup could not be changed: %w", err)
+			cfg.Startup.LaunchOnStartup = a.config.Startup.LaunchOnStartup
 		}
 	}
 
@@ -621,7 +626,7 @@ func (a *App) SaveConfig(cfg *config.Config) error {
 		a.registerHotkeysFromConfig()
 	}
 
-	return nil
+	return autostartErr
 }
 
 // SelectFolder opens a folder selection dialog

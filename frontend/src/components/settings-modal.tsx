@@ -312,7 +312,19 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       onClose();
     } catch (err) {
       console.error('Failed to save config:', err);
-      setError('Failed to save settings');
+      const message = String(err);
+      if (message.startsWith('settings saved')) {
+        // Other settings were saved; only the launch-on-startup change failed
+        const saved = {
+          ...localConfig,
+          startup: { ...localConfig.startup, launchOnStartup: originalConfig.startup.launchOnStartup },
+        };
+        setLocalConfig(saved);
+        setOriginalConfig(saved);
+        setError(message);
+      } else {
+        setError('Failed to save settings');
+      }
     }
 
     setIsSaving(false);
