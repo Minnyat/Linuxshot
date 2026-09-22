@@ -1,3 +1,5 @@
+//go:build windows
+
 package overlay
 
 // Window style constants
