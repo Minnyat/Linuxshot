@@ -15,6 +15,7 @@ dist/
 *.so
 *.dylib
 *.app/
+build/bin/
 
 # Development
 .env
