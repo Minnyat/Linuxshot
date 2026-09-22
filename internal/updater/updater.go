@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -11,8 +12,8 @@ import (
 )
 
 const (
-	GitHubOwner = "mrgoonie"
-	GitHubRepo  = "winshot"
+	GitHubOwner = "Minnyat"
+	GitHubRepo  = "Linuxshot"
 	ReleasesURL = "https://api.github.com/repos/" + GitHubOwner + "/" + GitHubRepo + "/releases/latest"
 )
 
@@ -86,23 +87,11 @@ func CheckForUpdate(currentVersion string) (*UpdateInfo, error) {
 		return nil, fmt.Errorf("invalid latest version: %w", err)
 	}
 
-	// Find portable exe download URL
-	downloadURL := ""
-	for _, asset := range release.Assets {
-		name := strings.ToLower(asset.Name)
-		if strings.HasSuffix(name, ".exe") && !strings.Contains(name, "setup") && !strings.Contains(name, "installer") {
-			downloadURL = asset.BrowserDownloadURL
-			break
-		}
-	}
-
-	// If no portable exe found, use the release page URL
-	if downloadURL == "" {
-		downloadURL = release.HTMLURL
-	}
+	// Only offer an update when the release ships a binary for this OS
+	downloadURL := selectAssetURL(release.Assets, runtime.GOOS)
 
 	return &UpdateInfo{
-		Available:    latest.GreaterThan(current),
+		Available:    downloadURL != "" && latest.GreaterThan(current),
 		CurrentVer:   currentVersion,
 		LatestVer:    release.TagName,
 		ReleaseURL:   release.HTMLURL,
@@ -115,4 +104,29 @@ func CheckForUpdate(currentVersion string) (*UpdateInfo, error) {
 // GetDownloadURL returns the GitHub releases page URL
 func GetDownloadURL() string {
 	return fmt.Sprintf("https://github.com/%s/%s/releases/latest", GitHubOwner, GitHubRepo)
+}
+
+// assetSuffixes lists acceptable release asset suffixes per OS, in order of preference
+var assetSuffixes = map[string][]string{
+	"linux":   {".appimage", ".deb", "linux-amd64.tar.gz"},
+	"windows": {".exe"},
+}
+
+// selectAssetURL returns the download URL of the preferred asset for goos,
+// or "" when the release has no asset for that OS.
+func selectAssetURL(assets []Asset, goos string) string {
+	for _, suffix := range assetSuffixes[goos] {
+		for _, asset := range assets {
+			name := strings.ToLower(asset.Name)
+			if !strings.HasSuffix(name, suffix) {
+				continue
+			}
+			// Windows: prefer the portable exe over the installer
+			if goos == "windows" && (strings.Contains(name, "setup") || strings.Contains(name, "installer")) {
+				continue
+			}
+			return asset.BrowserDownloadURL
+		}
+	}
+	return ""
 }
