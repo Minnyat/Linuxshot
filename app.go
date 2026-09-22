@@ -41,6 +41,7 @@ type App struct {
 	preCaptureY      int  // Window Y position before capture
 	isCapturing      bool // Flag to prevent resize events during capture
 	isWindowHidden   bool // Track window visibility state
+	trayRunning      bool // Tray icon started; required for close-to-tray
 
 	// Cloud upload
 	credManager    *upload.CredentialManager
@@ -85,6 +86,8 @@ func (a *App) startup(ctx context.Context) {
 	a.platform.Tray.SetOnShow(a.ShowWindow)
 	if err := a.platform.Tray.Start(); err != nil {
 		println("Warning: failed to start tray icon:", err.Error())
+	} else {
+		a.trayRunning = true
 	}
 
 	// Initialize window size tracking with config values
@@ -188,7 +191,8 @@ func (a *App) MinimizeToTray() {
 // OnBeforeClose is called when the window close button is clicked
 // Returns true to prevent the default close behavior (if close-to-tray is enabled)
 func (a *App) OnBeforeClose(ctx context.Context) bool {
-	if a.config != nil && a.config.Startup.CloseToTray {
+	// Without a tray icon, hiding would leave no way to restore or quit the app
+	if a.config != nil && a.config.Startup.CloseToTray && a.trayRunning {
 		// Hide window instead of closing
 		runtime.WindowHide(ctx)
 		a.isWindowHidden = true

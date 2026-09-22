@@ -244,3 +244,14 @@ func TestCapturingStateTracking(t *testing.T) {
 		t.Error("isCapturing should be false after clearing")
 	}
 }
+
+// TestOnBeforeClose_NoTray verifies close-to-tray is skipped when no tray icon is running
+func TestOnBeforeClose_NoTray(t *testing.T) {
+	app := NewApp()
+	app.config = config.Default()
+	app.config.Startup.CloseToTray = true
+
+	if app.OnBeforeClose(nil) {
+		t.Error("OnBeforeClose() = true without a tray, want false so the app quits")
+	}
+}
