@@ -1,11 +1,11 @@
 {
-  "name": "winshot",
+  "name": "linuxshot",
   "version": "1.6.0",
   "private": true,
-  "description": "Modern Screenshot Tool for Windows",
+  "description": "Modern Screenshot Tool for Linux",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mrgoonie/winshot.git"
+    "url": "https://github.com/Minnyat/Linuxshot.git"
   },
   "scripts": {
     "semantic-release": "semantic-release"

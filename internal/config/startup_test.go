@@ -1,3 +1,5 @@
+//go:build windows
+
 package config
 
 import (
@@ -121,7 +123,7 @@ func TestRegistryPathQuoting(t *testing.T) {
 	}
 	defer key.Close()
 
-	val, _, err := key.GetStringValue("WinShot")
+	val, _, err := key.GetStringValue("LinuxShot")
 	if err != nil {
 		t.Fatalf("Failed to read registry value: %v", err)
 	}

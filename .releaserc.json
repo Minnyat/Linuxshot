@@ -60,12 +60,8 @@
       {
         "assets": [
           {
-            "path": "build/bin/winshot.exe",
-            "label": "WinShot Portable (${nextRelease.version})"
-          },
-          {
-            "path": "build/bin/winshot-amd64-installer.exe",
-            "label": "WinShot Installer (${nextRelease.version})"
+            "path": "build/bin/linuxshot-linux-amd64.tar.gz",
+            "label": "LinuxShot Linux x86_64 (${nextRelease.version})"
           }
         ]
       }

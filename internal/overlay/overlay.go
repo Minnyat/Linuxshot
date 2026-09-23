@@ -1,3 +1,5 @@
+//go:build windows
+
 package overlay
 
 import (
@@ -150,7 +152,7 @@ func (m *Manager) messageLoop(readyCh chan<- error) {
 	m.hInstance, _, _ = procGetModuleHandleW.Call(0)
 
 	// Register window class
-	className, _ := syscall.UTF16PtrFromString("WinShotOverlay")
+	className, _ := syscall.UTF16PtrFromString("LinuxShotOverlay")
 	m.className = className
 
 	wc := WNDCLASSEXW{

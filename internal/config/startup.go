@@ -1,3 +1,5 @@
+//go:build windows
+
 package config
 
 import (
@@ -11,7 +13,7 @@ import (
 const (
 	// Windows Run registry key for current user startup
 	startupKeyPath = `Software\Microsoft\Windows\CurrentVersion\Run`
-	appName        = "WinShot"
+	appName        = "LinuxShot"
 )
 
 // IsStartupEnabled checks if the app is set to run on Windows startup

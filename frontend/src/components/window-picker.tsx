@@ -26,7 +26,7 @@ export function WindowPicker({ isOpen, onClose, onSelect }: WindowPickerProps) {
       const list = await GetWindowListWithThumbnails();
       // Filter out our own window and sort by title
       const filtered = (list as WindowInfoWithThumbnail[])
-        .filter(w => !w.title.includes('WinShot'))
+        .filter(w => !w.title.includes('LinuxShot'))
         .sort((a, b) => a.title.localeCompare(b.title));
       setWindows(filtered);
     } catch (error) {

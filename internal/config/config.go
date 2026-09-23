@@ -3,7 +3,9 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // HotkeyConfig holds hotkey settings
@@ -35,10 +37,10 @@ type QuickSaveConfig struct {
 
 // ExportConfig holds export default settings
 type ExportConfig struct {
-	DefaultFormat      string `json:"defaultFormat"`      // "png" or "jpeg"
-	JpegQuality        int    `json:"jpegQuality"`        // 0-100
-	IncludeBackground  bool   `json:"includeBackground"`
-	AutoCopyToClipboard bool  `json:"autoCopyToClipboard"`
+	DefaultFormat       string `json:"defaultFormat"` // "png" or "jpeg"
+	JpegQuality         int    `json:"jpegQuality"`   // 0-100
+	IncludeBackground   bool   `json:"includeBackground"`
+	AutoCopyToClipboard bool   `json:"autoCopyToClipboard"`
 }
 
 // WindowConfig holds window size and position settings
@@ -100,8 +102,7 @@ type Config struct {
 
 // Default returns default configuration
 func Default() *Config {
-	homeDir, _ := os.UserHomeDir()
-	defaultFolder := filepath.Join(homeDir, "Pictures", "WinShot")
+	defaultFolder := DefaultSaveFolder()
 
 	return &Config{
 		Hotkeys: HotkeyConfig{
@@ -156,13 +157,27 @@ func Default() *Config {
 	}
 }
 
+// DefaultSaveFolder returns the default QuickSave folder: <XDG Pictures>/LinuxShot.
+// Falls back to ~/Pictures when xdg-user-dir is unavailable or has no Pictures dir.
+func DefaultSaveFolder() string {
+	homeDir, _ := os.UserHomeDir()
+	pictures := filepath.Join(homeDir, "Pictures")
+	if out, err := exec.Command("xdg-user-dir", "PICTURES").Output(); err == nil {
+		// xdg-user-dir prints $HOME when the directory is not configured
+		if dir := strings.TrimSpace(string(out)); dir != "" && dir != homeDir {
+			pictures = dir
+		}
+	}
+	return filepath.Join(pictures, "LinuxShot")
+}
+
 // GetConfigPath returns the path to the config file
 func GetConfigPath() (string, error) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(configDir, "WinShot", "config.json"), nil
+	return filepath.Join(configDir, "linuxshot", "config.json"), nil
 }
 
 // Load reads config from disk, returns default if not found

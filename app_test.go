@@ -1,8 +1,8 @@
 package main
 
 import (
+	"linuxshot/internal/config"
 	"testing"
-	"winshot/internal/config"
 )
 
 // TestAppInitialization verifies App struct is created properly
@@ -120,18 +120,18 @@ func TestMinimizeToTrayState(t *testing.T) {
 // TestOnBeforeCloseLogic verifies close-to-tray behavior without runtime
 func TestOnBeforeCloseLogic(t *testing.T) {
 	tests := []struct {
-		name         string
-		closeToTray  bool
+		name          string
+		closeToTray   bool
 		expectPrevent bool
 	}{
 		{
-			name:         "Close-to-tray enabled",
-			closeToTray:  true,
+			name:          "Close-to-tray enabled",
+			closeToTray:   true,
 			expectPrevent: true,
 		},
 		{
-			name:         "Close-to-tray disabled",
-			closeToTray:  false,
+			name:          "Close-to-tray disabled",
+			closeToTray:   false,
 			expectPrevent: false,
 		},
 	}
@@ -242,5 +242,16 @@ func TestCapturingStateTracking(t *testing.T) {
 	app.isCapturing = false
 	if app.isCapturing {
 		t.Error("isCapturing should be false after clearing")
+	}
+}
+
+// TestOnBeforeClose_NoTray verifies close-to-tray is skipped when no tray icon is running
+func TestOnBeforeClose_NoTray(t *testing.T) {
+	app := NewApp()
+	app.config = config.Default()
+	app.config.Startup.CloseToTray = true
+
+	if app.OnBeforeClose(nil) {
+		t.Error("OnBeforeClose() = true without a tray, want false so the app quits")
 	}
 }

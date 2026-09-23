@@ -17,15 +17,12 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/webp"
-	"winshot/internal/config"
-	"winshot/internal/hotkeys"
-	"winshot/internal/library"
-	"winshot/internal/overlay"
-	"winshot/internal/screenshot"
-	"winshot/internal/tray"
-	"winshot/internal/updater"
-	"winshot/internal/upload"
-	winEnum "winshot/internal/windows"
+	"linuxshot/internal/config"
+	"linuxshot/internal/library"
+	"linuxshot/internal/platform"
+	"linuxshot/internal/screenshot"
+	"linuxshot/internal/updater"
+	"linuxshot/internal/upload"
 )
 
 // Version is set at build time via ldflags
@@ -34,18 +31,17 @@ var Version = "dev"
 // App struct
 type App struct {
 	ctx              context.Context
-	hotkeyManager    *hotkeys.HotkeyManager
-	overlayManager   *overlay.Manager
-	trayIcon         *tray.TrayIcon
+	platform         *platform.Platform
 	config           *config.Config
 	lastWidth        int
 	lastHeight       int
-	preCaptureWidth  int  // Window size before capture (protected from resize events)
+	preCaptureWidth  int // Window size before capture (protected from resize events)
 	preCaptureHeight int
 	preCaptureX      int  // Window X position before capture
 	preCaptureY      int  // Window Y position before capture
 	isCapturing      bool // Flag to prevent resize events during capture
 	isWindowHidden   bool // Track window visibility state
+	trayRunning      bool // Tray icon started; required for close-to-tray
 
 	// Cloud upload
 	credManager    *upload.CredentialManager
@@ -55,7 +51,7 @@ type App struct {
 
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{}
+	return &App{platform: platform.New(fmt.Sprintf("LinuxShot v%s", Version))}
 }
 
 // startup is called when the app starts
@@ -69,31 +65,30 @@ func (a *App) startup(ctx context.Context) {
 	}
 	a.config = cfg
 
-	// Initialize hotkey manager
-	a.hotkeyManager = hotkeys.NewHotkeyManager()
-	a.hotkeyManager.SetCallback(a.onHotkey)
+	// Initialize global hotkeys
+	a.platform.Hotkeys.SetCallback(a.onHotkey)
 
 	// Register hotkeys from config
 	a.registerHotkeysFromConfig()
-	a.hotkeyManager.Start()
+	a.platform.Hotkeys.Start()
 
-	// Initialize overlay manager for native region selection
-	a.overlayManager = overlay.NewManager()
-	if err := a.overlayManager.Start(); err != nil {
-		// Log warning but continue - will fall back to React overlay
-		println("Warning: failed to start overlay manager:", err.Error())
+	// Initialize native region selection overlay (optional capability)
+	if a.platform.RegionSelector != nil {
+		if err := a.platform.RegionSelector.Start(); err != nil {
+			// Disable it so PrepareRegionCapture reports unsupported instead of waiting on a dead overlay
+			println("Warning: failed to start overlay manager:", err.Error())
+			a.platform.RegionSelector = nil
+		}
 	}
 
-	// Initialize system tray with version in tooltip
-	a.trayIcon = tray.NewTrayIcon(fmt.Sprintf("WinShot v%s", Version))
-	a.trayIcon.SetCallback(a.onTrayMenu)
-	a.trayIcon.SetOnShow(func() {
-		runtime.WindowShow(a.ctx)
-		a.isWindowHidden = false
-		runtime.WindowSetAlwaysOnTop(a.ctx, true)
-		runtime.WindowSetAlwaysOnTop(a.ctx, false)
-	})
-	a.trayIcon.Start()
+	// Initialize system tray (tooltip set in NewApp)
+	a.platform.Tray.SetCallback(a.onTrayMenu)
+	a.platform.Tray.SetOnShow(a.ShowWindow)
+	if err := a.platform.Tray.Start(); err != nil {
+		println("Warning: failed to start tray icon:", err.Error())
+	} else {
+		a.trayRunning = true
+	}
 
 	// Initialize window size tracking with config values
 	a.lastWidth = cfg.Window.Width
@@ -126,46 +121,42 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 
 	// Cleanup resources
-	if a.hotkeyManager != nil {
-		a.hotkeyManager.Stop()
-		a.hotkeyManager.UnregisterAll()
+	a.platform.Hotkeys.Stop()
+	a.platform.Hotkeys.UnregisterAll()
+	if a.platform.RegionSelector != nil {
+		a.platform.RegionSelector.Stop()
 	}
-	if a.overlayManager != nil {
-		a.overlayManager.Stop()
-	}
-	if a.trayIcon != nil {
-		a.trayIcon.Stop()
-	}
+	a.platform.Tray.Stop()
 }
 
 // onHotkey handles global hotkey events
-func (a *App) onHotkey(id int) {
+func (a *App) onHotkey(id platform.HotkeyID) {
 	switch id {
-	case hotkeys.HotkeyFullscreen:
+	case platform.HotkeyFullscreen:
 		runtime.EventsEmit(a.ctx, "hotkey:fullscreen")
-	case hotkeys.HotkeyRegion:
+	case platform.HotkeyRegion:
 		runtime.EventsEmit(a.ctx, "hotkey:region")
-	case hotkeys.HotkeyWindow:
+	case platform.HotkeyWindow:
 		runtime.EventsEmit(a.ctx, "hotkey:window")
 	}
 }
 
 // onTrayMenu handles tray menu selections
-func (a *App) onTrayMenu(menuID int) {
+func (a *App) onTrayMenu(menuID platform.TrayMenuID) {
 	switch menuID {
-	case tray.MenuFullscreen:
+	case platform.TrayFullscreen:
 		runtime.EventsEmit(a.ctx, "hotkey:fullscreen")
-	case tray.MenuRegion:
+	case platform.TrayRegion:
 		runtime.EventsEmit(a.ctx, "hotkey:region")
-	case tray.MenuWindow:
+	case platform.TrayWindow:
 		runtime.EventsEmit(a.ctx, "hotkey:window")
-	case tray.MenuLibrary:
+	case platform.TrayLibrary:
 		// Show main window first so library modal has context
 		runtime.WindowShow(a.ctx)
 		a.isWindowHidden = false
 		// Emit event to open library window
 		runtime.EventsEmit(a.ctx, "tray:library")
-	case tray.MenuQuit:
+	case platform.TrayQuit:
 		// Quit the application - use goroutine to avoid blocking tray menu
 		go func() {
 			// First try graceful shutdown via runtime.Quit
@@ -200,7 +191,8 @@ func (a *App) MinimizeToTray() {
 // OnBeforeClose is called when the window close button is clicked
 // Returns true to prevent the default close behavior (if close-to-tray is enabled)
 func (a *App) OnBeforeClose(ctx context.Context) bool {
-	if a.config != nil && a.config.Startup.CloseToTray {
+	// Without a tray icon, hiding would leave no way to restore or quit the app
+	if a.config != nil && a.config.Startup.CloseToTray && a.trayRunning {
 		// Hide window instead of closing
 		runtime.WindowHide(ctx)
 		a.isWindowHidden = true
@@ -211,8 +203,8 @@ func (a *App) OnBeforeClose(ctx context.Context) bool {
 
 // VirtualScreenBounds represents the combined bounds of all monitors
 type VirtualScreenBounds struct {
-	X      int `json:"x"`      // Can be negative (monitor left of primary)
-	Y      int `json:"y"`      // Can be negative (monitor above primary)
+	X      int `json:"x"` // Can be negative (monitor left of primary)
+	Y      int `json:"y"` // Can be negative (monitor above primary)
 	Width  int `json:"width"`
 	Height int `json:"height"`
 }
@@ -230,8 +222,13 @@ type RegionCaptureData struct {
 	DisplayIndex int                       `json:"displayIndex"` // Index of the captured display
 }
 
-// PrepareRegionCapture prepares for region selection using native Win32 overlay
+// PrepareRegionCapture prepares for region selection using the native overlay.
+// Returns platform.ErrUnsupported when no native overlay is available (e.g. Linux).
 func (a *App) PrepareRegionCapture() (*RegionCaptureData, error) {
+	if a.platform.RegionSelector == nil {
+		return nil, fmt.Errorf("region capture: %w", platform.ErrUnsupported)
+	}
+
 	// Set capturing flag to prevent resize events from overwriting saved size
 	a.isCapturing = true
 
@@ -280,7 +277,7 @@ func (a *App) PrepareRegionCapture() (*RegionCaptureData, error) {
 
 	// Show native overlay and get result channel
 	bounds := image.Rect(screenX, screenY, screenX+virtualWidth, screenY+virtualHeight)
-	resultCh := a.overlayManager.Show(rgbaImg, bounds, scaleRatio)
+	resultCh := a.platform.RegionSelector.Show(rgbaImg, bounds, scaleRatio)
 
 	// Wait for selection result in goroutine
 	go func() {
@@ -366,7 +363,7 @@ func (a *App) ShowWindow() {
 
 // CaptureFullscreen captures the display where the cursor is currently located
 func (a *App) CaptureFullscreen() (*screenshot.CaptureResult, error) {
-	return screenshot.CaptureFullscreen()
+	return screenshot.CaptureDisplay(a.platform.Screen.MonitorAtCursor())
 }
 
 // CaptureRegion captures a specific region of the screen
@@ -381,9 +378,9 @@ func (a *App) CaptureDisplay(displayIndex int) (*screenshot.CaptureResult, error
 
 // CaptureWindow captures a specific window by handle
 func (a *App) CaptureWindow(hwnd int) (*screenshot.CaptureResult, error) {
-	result, err := screenshot.CaptureWindowByCoords(uintptr(hwnd))
+	result, err := a.platform.Screen.CaptureWindow(uint64(hwnd))
 
-	// Bring WinShot back to front after capture
+	// Bring LinuxShot back to front after capture
 	runtime.WindowShow(a.ctx)
 	runtime.WindowSetAlwaysOnTop(a.ctx, true)
 	time.Sleep(50 * time.Millisecond)
@@ -399,7 +396,7 @@ func (a *App) GetDisplayCount() int {
 
 // GetActiveDisplayIndex returns the index of the display where the cursor is located
 func (a *App) GetActiveDisplayIndex() int {
-	return screenshot.GetMonitorAtCursor()
+	return a.platform.Screen.MonitorAtCursor()
 }
 
 // GetVirtualScreenBounds returns the combined bounds of all monitors (virtual desktop)
@@ -428,19 +425,19 @@ func (a *App) GetDisplayBounds(displayIndex int) DisplayBounds {
 }
 
 // GetWindowList returns a list of all visible windows
-func (a *App) GetWindowList() ([]winEnum.WindowInfo, error) {
-	return winEnum.EnumWindows()
+func (a *App) GetWindowList() ([]platform.WindowInfo, error) {
+	return a.platform.Windows.List()
 }
 
 // GetWindowListWithThumbnails returns a list of all visible windows with thumbnails
-func (a *App) GetWindowListWithThumbnails() ([]winEnum.WindowInfoWithThumbnail, error) {
+func (a *App) GetWindowListWithThumbnails() ([]platform.WindowInfoWithThumbnail, error) {
 	// Use 160x120 for thumbnails (4:3 aspect, good balance of quality and speed)
-	return winEnum.EnumWindowsWithThumbnails(160, 120)
+	return a.platform.Windows.ListWithThumbnails(160, 120)
 }
 
 // GetWindowInfo returns information about a specific window
-func (a *App) GetWindowInfo(hwnd int) (*winEnum.WindowInfo, error) {
-	return winEnum.GetWindowInfo(uintptr(hwnd))
+func (a *App) GetWindowInfo(hwnd int) (*platform.WindowInfo, error) {
+	return a.platform.Windows.Info(uint64(hwnd))
 }
 
 // SaveImageResult represents the result of saving an image
@@ -506,11 +503,7 @@ func (a *App) QuickSave(imageData string, format string) SaveImageResult {
 	// Get save directory from config (fallback to default)
 	saveDir := a.config.QuickSave.Folder
 	if saveDir == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return SaveImageResult{Success: false, Error: "Failed to get home directory: " + err.Error()}
-		}
-		saveDir = filepath.Join(homeDir, "Pictures", "WinShot")
+		saveDir = config.DefaultSaveFolder()
 	}
 
 	// Create save directory if it doesn't exist
@@ -538,14 +531,14 @@ func (a *App) QuickSave(imageData string, format string) SaveImageResult {
 
 	switch pattern {
 	case "date":
-		// Date only: winshot_2024-01-15.png
-		filename = "winshot_" + now.Format("2006-01-02") + ext
+		// Date only: linuxshot_2024-01-15.png
+		filename = "linuxshot_" + now.Format("2006-01-02") + ext
 		// Avoid overwriting: append counter if file exists
 		filePath := filepath.Join(saveDir, filename)
 		if _, err := os.Stat(filePath); err == nil {
 			counter := 1
 			for {
-				filename = "winshot_" + now.Format("2006-01-02") + "_" + fmt.Sprintf("%d", counter) + ext
+				filename = "linuxshot_" + now.Format("2006-01-02") + "_" + fmt.Sprintf("%d", counter) + ext
 				filePath = filepath.Join(saveDir, filename)
 				if _, err := os.Stat(filePath); os.IsNotExist(err) {
 					break
@@ -554,10 +547,10 @@ func (a *App) QuickSave(imageData string, format string) SaveImageResult {
 			}
 		}
 	case "increment":
-		// Incremental: winshot_001.png, winshot_002.png
+		// Incremental: linuxshot_001.png, linuxshot_002.png
 		counter := 1
 		for {
-			filename = fmt.Sprintf("winshot_%03d%s", counter, ext)
+			filename = fmt.Sprintf("linuxshot_%03d%s", counter, ext)
 			filePath := filepath.Join(saveDir, filename)
 			if _, err := os.Stat(filePath); os.IsNotExist(err) {
 				break
@@ -565,8 +558,8 @@ func (a *App) QuickSave(imageData string, format string) SaveImageResult {
 			counter++
 		}
 	default: // "timestamp"
-		// Full timestamp: winshot_2024-01-15_14-30-45.png
-		filename = "winshot_" + now.Format("2006-01-02_15-04-05") + ext
+		// Full timestamp: linuxshot_2024-01-15_14-30-45.png
+		filename = "linuxshot_" + now.Format("2006-01-02_15-04-05") + ext
 	}
 
 	filePath := filepath.Join(saveDir, filename)
@@ -608,10 +601,13 @@ func (a *App) GetConfig() *config.Config {
 
 // SaveConfig saves the application configuration
 func (a *App) SaveConfig(cfg *config.Config) error {
-	// Update startup setting if changed
+	// Update startup setting if changed. On failure keep the previous value so
+	// the saved flag matches the OS state, but still save the other settings.
+	var autostartErr error
 	if cfg.Startup.LaunchOnStartup != a.config.Startup.LaunchOnStartup {
-		if err := config.SetStartupEnabled(cfg.Startup.LaunchOnStartup); err != nil {
-			return err
+		if err := a.platform.Autostart.SetEnabled(cfg.Startup.LaunchOnStartup); err != nil {
+			autostartErr = fmt.Errorf("settings saved, but launch on startup could not be changed: %w", err)
+			cfg.Startup.LaunchOnStartup = a.config.Startup.LaunchOnStartup
 		}
 	}
 
@@ -630,11 +626,11 @@ func (a *App) SaveConfig(cfg *config.Config) error {
 
 	// Re-register hotkeys if they changed
 	if hotkeysChanged {
-		a.hotkeyManager.UnregisterAll()
+		a.platform.Hotkeys.UnregisterAll()
 		a.registerHotkeysFromConfig()
 	}
 
-	return nil
+	return autostartErr
 }
 
 // SelectFolder opens a folder selection dialog
@@ -645,21 +641,11 @@ func (a *App) SelectFolder() (string, error) {
 }
 
 // registerHotkeysFromConfig registers hotkeys based on current config
+// Invalid or unsupported hotkeys are skipped, matching previous behavior.
 func (a *App) registerHotkeysFromConfig() {
-	// Parse and register fullscreen hotkey
-	if mods, key, ok := hotkeys.ParseHotkeyString(a.config.Hotkeys.Fullscreen); ok {
-		a.hotkeyManager.Register(hotkeys.HotkeyFullscreen, mods, key)
-	}
-
-	// Parse and register region hotkey
-	if mods, key, ok := hotkeys.ParseHotkeyString(a.config.Hotkeys.Region); ok {
-		a.hotkeyManager.Register(hotkeys.HotkeyRegion, mods, key)
-	}
-
-	// Parse and register window hotkey
-	if mods, key, ok := hotkeys.ParseHotkeyString(a.config.Hotkeys.Window); ok {
-		a.hotkeyManager.Register(hotkeys.HotkeyWindow, mods, key)
-	}
+	a.platform.Hotkeys.Register(platform.HotkeyFullscreen, a.config.Hotkeys.Fullscreen)
+	a.platform.Hotkeys.Register(platform.HotkeyRegion, a.config.Hotkeys.Region)
+	a.platform.Hotkeys.Register(platform.HotkeyWindow, a.config.Hotkeys.Window)
 }
 
 // GetBackgroundImages returns the list of saved background images (base64 data URLs)
@@ -748,9 +734,9 @@ func (a *App) OpenImage() (*screenshot.CaptureResult, error) {
 	}, nil
 }
 
-// GetClipboardImage reads an image from the Windows clipboard
+// GetClipboardImage reads an image from the system clipboard
 func (a *App) GetClipboardImage() (*screenshot.CaptureResult, error) {
-	return screenshot.GetClipboardImage()
+	return a.platform.Clipboard.Image()
 }
 
 // CheckForUpdate checks GitHub for a newer version
@@ -951,11 +937,7 @@ func (a *App) GetLibraryImages() ([]library.LibraryImage, error) {
 	folder := a.config.QuickSave.Folder
 	if folder == "" {
 		// Fallback to default location
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get home directory: %w", err)
-		}
-		folder = filepath.Join(homeDir, "Pictures", "WinShot")
+		folder = config.DefaultSaveFolder()
 	}
 
 	opts := library.DefaultScanOptions()
@@ -968,8 +950,7 @@ func (a *App) OpenInEditor(imagePath string) (*screenshot.CaptureResult, error) 
 	// Validate path is within QuickSave folder (prevent directory traversal)
 	folder := a.config.QuickSave.Folder
 	if folder == "" {
-		homeDir, _ := os.UserHomeDir()
-		folder = filepath.Join(homeDir, "Pictures", "WinShot")
+		folder = config.DefaultSaveFolder()
 	}
 
 	absPath, err := filepath.Abs(imagePath)
@@ -1030,8 +1011,7 @@ func (a *App) DeleteScreenshot(imagePath string) error {
 	// Validate path is within QuickSave folder (prevent directory traversal)
 	folder := a.config.QuickSave.Folder
 	if folder == "" {
-		homeDir, _ := os.UserHomeDir()
-		folder = filepath.Join(homeDir, "Pictures", "WinShot")
+		folder = config.DefaultSaveFolder()
 	}
 
 	absPath, err := filepath.Abs(imagePath)

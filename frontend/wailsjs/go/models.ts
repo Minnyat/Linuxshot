@@ -413,6 +413,61 @@ export namespace main {
 
 }
 
+export namespace platform {
+	
+	export class WindowInfo {
+	    handle: number;
+	    title: string;
+	    className: string;
+	    x: number;
+	    y: number;
+	    width: number;
+	    height: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new WindowInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.handle = source["handle"];
+	        this.title = source["title"];
+	        this.className = source["className"];
+	        this.x = source["x"];
+	        this.y = source["y"];
+	        this.width = source["width"];
+	        this.height = source["height"];
+	    }
+	}
+	export class WindowInfoWithThumbnail {
+	    handle: number;
+	    title: string;
+	    className: string;
+	    x: number;
+	    y: number;
+	    width: number;
+	    height: number;
+	    thumbnail: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new WindowInfoWithThumbnail(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.handle = source["handle"];
+	        this.title = source["title"];
+	        this.className = source["className"];
+	        this.x = source["x"];
+	        this.y = source["y"];
+	        this.width = source["width"];
+	        this.height = source["height"];
+	        this.thumbnail = source["thumbnail"];
+	    }
+	}
+
+}
+
 export namespace screenshot {
 	
 	export class CaptureResult {
@@ -479,61 +534,6 @@ export namespace upload {
 	        this.success = source["success"];
 	        this.publicUrl = source["publicUrl"];
 	        this.error = source["error"];
-	    }
-	}
-
-}
-
-export namespace windows {
-	
-	export class WindowInfo {
-	    handle: any;
-	    title: string;
-	    className: string;
-	    x: number;
-	    y: number;
-	    width: number;
-	    height: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new WindowInfo(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.handle = source["handle"];
-	        this.title = source["title"];
-	        this.className = source["className"];
-	        this.x = source["x"];
-	        this.y = source["y"];
-	        this.width = source["width"];
-	        this.height = source["height"];
-	    }
-	}
-	export class WindowInfoWithThumbnail {
-	    handle: any;
-	    title: string;
-	    className: string;
-	    x: number;
-	    y: number;
-	    width: number;
-	    height: number;
-	    thumbnail: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new WindowInfoWithThumbnail(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.handle = source["handle"];
-	        this.title = source["title"];
-	        this.className = source["className"];
-	        this.x = source["x"];
-	        this.y = source["y"];
-	        this.width = source["width"];
-	        this.height = source["height"];
-	        this.thumbnail = source["thumbnail"];
 	    }
 	}
 

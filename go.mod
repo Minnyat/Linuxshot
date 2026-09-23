@@ -1,4 +1,4 @@
-module winshot
+module linuxshot
 
 go 1.24.0
 

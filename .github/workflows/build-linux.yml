@@ -1,0 +1,70 @@
+name: Build Linux
+
+# Reusable build: vet/test (Linux + Windows build tags), then wails build.
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: Upload the release tarball under this artifact name (skipped when empty)
+        type: string
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      # frontend/dist is embedded by package main, so build it before vet/test
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm install
+          npm run build
+
+      - name: Go vet
+        run: go vet ./...
+
+      # Keeps //go:build windows code compiling; unsafeptr flags pre-existing
+      # Win32 clipboard pointer arithmetic
+      - name: Go vet (Windows build tags)
+        run: GOOS=windows go vet -unsafeptr=false ./...
+
+      - name: Go test
+        run: go test ./...
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+
+      - name: Get version from package.json
+        id: version
+        run: echo "VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        run: wails build -clean -platform linux/amd64 -tags webkit2_41 -ldflags "-X main.Version=${{ steps.version.outputs.VERSION }}"
+
+      - name: Package tarball
+        run: tar -czf build/bin/linuxshot-linux-amd64.tar.gz -C build/bin linuxshot
+
+      - name: Upload build artifacts
+        if: inputs.artifact-name != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: build/bin/linuxshot-linux-amd64.tar.gz

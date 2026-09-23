@@ -1347,7 +1347,7 @@ function App() {
       // Generate filename
       const now = new Date();
       const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const filename = `winshot_${timestamp}.png`;
+      const filename = `linuxshot_${timestamp}.png`;
 
       // Get base64 data
       const base64Data = dataUrl.split(',')[1];

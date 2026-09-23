@@ -1,3 +1,5 @@
+//go:build windows
+
 package tray
 
 import (
@@ -208,7 +210,7 @@ func (t *TrayIcon) run() {
 	t.hIcon = loadIcon(hInstance)
 
 	// Register window class
-	className := syscall.StringToUTF16Ptr("WinShotTrayClass")
+	className := syscall.StringToUTF16Ptr("LinuxShotTrayClass")
 	wndClass := WNDCLASSEXW{
 		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEXW{})),
 		LpfnWndProc:   syscall.NewCallback(trayWndProc),
@@ -221,7 +223,7 @@ func (t *TrayIcon) run() {
 	t.hwnd, _, _ = procCreateWindowExW.Call(
 		0,
 		uintptr(unsafe.Pointer(className)),
-		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("WinShotTray"))),
+		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("LinuxShotTray"))),
 		0,
 		0, 0, 0, 0,
 		0, 0,
@@ -321,7 +323,7 @@ func (t *TrayIcon) showMenu() {
 	}
 
 	// Add menu items
-	appendMenu(hMenu, MF_STRING, MenuShow, "Show WinShot")
+	appendMenu(hMenu, MF_STRING, MenuShow, "Show LinuxShot")
 	appendMenu(hMenu, MF_SEPARATOR, 0, "")
 	appendMenu(hMenu, MF_STRING, MenuFullscreen, "Capture Fullscreen")
 	appendMenu(hMenu, MF_STRING, MenuRegion, "Capture Region")
