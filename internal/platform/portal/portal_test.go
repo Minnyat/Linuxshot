@@ -8,15 +8,22 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/godbus/dbus/v5"
 )
+
+// concurrentParentPrefix carries a per-capture width through parent_window in
+// TestCapture_Concurrent.
+const concurrentParentPrefix = "x11:0x"
 
 // ==================== fake bus ====================
 
@@ -1102,6 +1109,11 @@ func assertReleasedSynchronously(t *testing.T, fb *fakeBus) {
 
 // TestCapture_Concurrent exercises the concurrency the Client doc comment
 // promises: one client, several captures at once, each getting its own image.
+//
+// Each capture asks for a different width and asserts it got exactly that back.
+// The width travels in parent_window, which the client passes through untouched,
+// so the fake can answer every request with a differently sized image: two
+// captures reading each other's file would be caught, not averaged away.
 func TestCapture_Concurrent(t *testing.T) {
 	const n = 8
 	dir := t.TempDir()
@@ -1111,16 +1123,25 @@ func TestCapture_Concurrent(t *testing.T) {
 			return &dbus.Call{}
 		}
 		handle := handleFromCall(t, fb, c)
-		// One file per request, named after its own handle, so a client that
-		// mixed two requests up would read the wrong size or a deleted file.
-		width := 1 + len(handle)%16
+		parent, ok := c.Args[0].(string)
+		if !ok {
+			t.Errorf("parent_window is %T, want string", c.Args[0])
+			return &dbus.Call{Err: errors.New("bad parent_window")}
+		}
+		width, err := strconv.Atoi(strings.TrimPrefix(parent, concurrentParentPrefix))
+		if err != nil {
+			t.Errorf("parent_window %q does not carry a width: %v", parent, err)
+			return &dbus.Call{Err: errors.New("bad parent_window")}
+		}
+
+		// One file per request, sized to the width that request asked for.
 		path := filepath.Join(dir, filepath.Base(string(handle))+".png")
 		f, err := os.Create(path)
 		if err != nil {
 			t.Errorf("create %s: %v", path, err)
 			return &dbus.Call{Err: errors.New("cannot create file")}
 		}
-		if err := png.Encode(f, image.NewRGBA(image.Rect(0, 0, width, 2))); err != nil {
+		if err := png.Encode(f, image.NewRGBA(image.Rect(0, 0, width, 2*width))); err != nil {
 			t.Errorf("encode %s: %v", path, err)
 		}
 		_ = f.Close()
@@ -1138,16 +1159,19 @@ func TestCapture_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
+		width := i + 1
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			img, err := c.Capture(context.Background(), Options{})
+			img, err := c.Capture(context.Background(), Options{
+				ParentWindow: concurrentParentPrefix + strconv.Itoa(width),
+			})
 			if err != nil {
-				errs <- err
+				errs <- fmt.Errorf("width %d: %w", width, err)
 				return
 			}
-			if img.Bounds().Dy() != 2 || img.Bounds().Dx() < 1 {
-				errs <- fmt.Errorf("unexpected bounds %v", img.Bounds())
+			if want := image.Rect(0, 0, width, 2*width); img.Bounds() != want {
+				errs <- fmt.Errorf("width %d: bounds = %v, want %v (images crossed between captures)", width, img.Bounds(), want)
 			}
 		}()
 	}
@@ -1309,5 +1333,179 @@ func TestCapture_SubscribeErrorFromCancelledContext(t *testing.T) {
 	}
 	if errors.Is(err, ErrUnavailable) {
 		t.Errorf("Capture() error = %v also matches ErrUnavailable", err)
+	}
+}
+
+// TestCapture_ConnectionClosedDuringCall covers a transport failure instead of a
+// portal refusal: godbus finalizes a pending call with dbus.ErrClosed, which is
+// not a dbus.Error, so it must not be reported as the portal denying us. The
+// signal-wait branch already answers ErrUnavailable for a dropped connection
+// (TestCapture_ConnectionDropped); both branches have to agree.
+func TestCapture_ConnectionClosedDuringCall(t *testing.T) {
+	fb := newFakeBus()
+	fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+		return &dbus.Call{Err: dbus.ErrClosed}
+	}
+
+	_, err := testClient(fb).Capture(context.Background(), Options{})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Capture() error = %v, want ErrUnavailable", err)
+	}
+	if errors.Is(err, ErrDenied) {
+		t.Errorf("Capture() error = %v also matches ErrDenied", err)
+	}
+	assertReleasedSynchronously(t, fb)
+}
+
+func TestVersion_ConnectionClosed(t *testing.T) {
+	fb := newFakeBus()
+	fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+		return &dbus.Call{Err: dbus.ErrClosed}
+	}
+
+	if _, err := testClient(fb).Version(context.Background()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Version() error = %v, want ErrUnavailable", err)
+	}
+}
+
+func TestCallError(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	tests := []struct {
+		name     string
+		ctx      context.Context
+		err      error
+		fallback error
+		want     error
+		notWant  error
+	}{
+		{
+			name: "caller cancelled beats everything",
+			ctx:  cancelled, err: dbus.Error{Name: "org.freedesktop.portal.Error.NotAllowed"}, fallback: ErrDenied,
+			want: context.Canceled, notWant: ErrDenied,
+		},
+		{
+			name: "caller deadline beats everything",
+			ctx:  expired, err: dbus.ErrClosed, fallback: ErrDenied,
+			want: ErrTimeout, notWant: ErrUnavailable,
+		},
+		{
+			name: "call's own context error",
+			ctx:  context.Background(), err: context.DeadlineExceeded, fallback: ErrDenied,
+			want: ErrTimeout, notWant: ErrDenied,
+		},
+		{
+			name: "closed connection is unavailable, not denied",
+			ctx:  context.Background(), err: dbus.ErrClosed, fallback: ErrDenied,
+			want: ErrUnavailable, notWant: ErrDenied,
+		},
+		{
+			name: "raw transport error is unavailable",
+			ctx:  context.Background(), err: io.ErrUnexpectedEOF, fallback: ErrDenied,
+			want: ErrUnavailable, notWant: ErrDenied,
+		},
+		{
+			name: "wrapped transport error is unavailable",
+			ctx:  context.Background(), err: fmt.Errorf("subscribe to /x: %w", syscall.ECONNRESET), fallback: ErrUnavailable,
+			want: ErrUnavailable, notWant: ErrDenied,
+		},
+		{
+			name: "missing service is unavailable",
+			ctx:  context.Background(), err: dbus.Error{Name: "org.freedesktop.DBus.Error.ServiceUnknown"}, fallback: ErrDenied,
+			want: ErrUnavailable, notWant: ErrDenied,
+		},
+		{
+			name: "portal rejection uses the call site's fallback",
+			ctx:  context.Background(), err: dbus.Error{Name: "org.freedesktop.portal.Error.NotAllowed"}, fallback: ErrDenied,
+			want: ErrDenied, notWant: ErrUnavailable,
+		},
+		{
+			name: "bus rejection uses the call site's fallback",
+			ctx:  context.Background(), err: dbus.Error{Name: "org.freedesktop.DBus.Error.AccessDenied"}, fallback: ErrUnavailable,
+			want: ErrUnavailable, notWant: ErrDenied,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := callError(tt.ctx, tt.err, tt.fallback)
+			if !errors.Is(got, tt.want) {
+				t.Errorf("callError() = %v, want it to match %v", got, tt.want)
+			}
+			if errors.Is(got, tt.notWant) {
+				t.Errorf("callError() = %v, want it NOT to match %v", got, tt.notWant)
+			}
+		})
+	}
+}
+
+// TestClose_DeclinesNewReaperWhileWaiting is the contention case: Close is
+// already waiting on one reaper when a second capture is abandoned. The first
+// reaper must still get its file, and the second must not queue work onto a
+// connection that is closing.
+func TestClose_DeclinesNewReaperWhileWaiting(t *testing.T) {
+	path, uri := writePNG(t, "first.png", 2, 2)
+	fb := newFakeBus()
+	var respondOnce sync.Once
+	fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+		if c.Method != screenshotIface+".Screenshot" {
+			return &dbus.Call{}
+		}
+		handle := handleFromCall(t, fb, c)
+		// Only the first request is ever answered, and late enough that Close is
+		// waiting by then.
+		respondOnce.Do(func() {
+			go func() {
+				time.Sleep(400 * time.Millisecond)
+				fb.emit(&dbus.Signal{
+					Sender: busName,
+					Path:   handle,
+					Name:   requestIface + ".Response",
+					Body:   []interface{}{responseSuccess, map[string]dbus.Variant{"uri": dbus.MakeVariant(uri)}},
+				})
+			}()
+		})
+		return &dbus.Call{Body: []interface{}{handle}}
+	}
+
+	c := testClient(fb)
+
+	first, cancelFirst := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancelFirst()
+	if _, err := c.Capture(first, Options{}); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("first Capture() error = %v, want ErrTimeout", err)
+	}
+	if _, _, gone := fb.snapshot(); gone != 0 {
+		t.Fatalf("released %d signal channels, want 0: the reaper still holds the first one", gone)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+	time.Sleep(50 * time.Millisecond) // let Close start waiting on the live reaper
+
+	second, cancelSecond := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancelSecond()
+	if _, err := c.Capture(second, Options{}); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("second Capture() error = %v, want ErrTimeout", err)
+	}
+	// Declined: the second capture released its own subscription inline, while
+	// the first is still held by the reaper Close is waiting for.
+	if _, _, gone := fb.snapshot(); gone != 1 {
+		t.Errorf("released %d signal channels, want 1 (only the declined capture's)", gone)
+	}
+
+	if err := <-closed; err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("Close() returned before the first reaper deleted %s (stat err = %v)", path, err)
+	}
+	if _, _, gone := fb.snapshot(); gone != 2 {
+		t.Errorf("released %d signal channels after Close, want 2", gone)
+	}
+	if !fb.closed {
+		t.Error("Close() did not close the bus connection")
 	}
 }

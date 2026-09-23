@@ -330,7 +330,15 @@ func (c *Client) reapWait() time.Duration {
 
 // startReaper hands the subscription to a background reaper and reports whether
 // it took it. It declines once Close has begun, because the bus connection is
-// about to go away; the caller then keeps the cleanup and returns as usual.
+// about to go away.
+//
+// A declined caller keeps only the unsubscribe: it does not reap a late file and
+// does not send Request.Close. Both are deliberate on a connection that is
+// closing - Request.Close is a round trip that would not land, and reaping needs
+// a Response that the imminent bus.Close makes unreachable. Do not "fix" the
+// missing closeRequest here; the cost is a leftover file on a client closed
+// moments after an abandoned capture, which Close's own wait already covers for
+// every reaper that did start.
 func (c *Client) startReaper(handle dbus.ObjectPath, signals <-chan *dbus.Signal, unsubscribe func()) bool {
 	c.mu.Lock()
 	if c.closing {
@@ -363,8 +371,8 @@ func (c *Client) closeRequest(handle dbus.ObjectPath) {
 // Request.Close ends the user interaction but not a capture already under way:
 // the portal still writes the file, and that file is ours to delete. Worse,
 // closing suppresses the Response, which is the only place the file's uri
-// appears. So the order here is listen first, close last - wait up to
-// the reap timeout for a Response and delete whatever file it names, and only when
+// appears. So the order here is listen first, close last - wait out the reap
+// timeout for a Response and delete whatever file it names, and only when
 // nothing answers assume a dialog is sitting there unanswered and dismiss it.
 //
 // If the process exits before a late Response arrives the file is left behind,
@@ -409,19 +417,36 @@ func waitError(err error) error {
 	return fmt.Errorf("portal: screenshot request abandoned: %w", err)
 }
 
-// callError maps a failed D-Bus call. The caller's context comes first: a
-// deadline or cancellation is why the call failed, and reporting it as anything
-// else would make the error match two unrelated sentinels at once. Otherwise a
-// D-Bus error naming a missing service or interface is ErrUnavailable, and
-// anything else falls back to the sentinel the call site nominates - ErrDenied
-// for a request the portal itself rejected, ErrUnavailable for the bus daemon
-// refusing to set up a subscription.
+// callError maps a failed D-Bus call, in three steps.
+//
+// The caller's context comes first: a deadline or cancellation is why the call
+// failed, and reporting it as anything else would make the error match two
+// unrelated sentinels at once.
+//
+// Then, a reply that is not a dbus.Error at all never came from a peer: the
+// transport failed, which godbus reports as dbus.ErrClosed or a raw io/net
+// error. The portal never saw the request, so that is ErrUnavailable - the same
+// sentinel the signal-wait branch returns for a closed connection, so one event
+// cannot yield two answers depending on where Capture happened to be.
+//
+// Only a genuine dbus.Error is left. A name meaning "nothing is there" is
+// ErrUnavailable; anything else is a peer rejecting us, and the sentinel for
+// that is the call site's to choose - ErrDenied for the portal refusing a
+// request, ErrUnavailable for the bus daemon refusing a subscription.
 func callError(ctx context.Context, err error, fallback error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return waitError(ctxErr)
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// The call carried a context error of its own while ours is still live.
+		return waitError(err)
+	}
+
 	var busErr dbus.Error
-	if errors.As(err, &busErr) && isUnavailableName(busErr.Name) {
+	if !errors.As(err, &busErr) {
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
+	if isUnavailableName(busErr.Name) {
 		return fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return fmt.Errorf("%w: %w", fallback, err)
