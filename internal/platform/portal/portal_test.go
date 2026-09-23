@@ -5,6 +5,7 @@ package portal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/png"
 	"os"
@@ -60,7 +61,11 @@ func (fb *fakeBus) AddMatch(ctx context.Context, opts ...dbus.MatchOption) error
 	return nil
 }
 
-func (fb *fakeBus) RemoveMatch(opts ...dbus.MatchOption) error {
+func (fb *fakeBus) RemoveMatch(ctx context.Context, opts ...dbus.MatchOption) error {
+	if err := ctx.Err(); err != nil {
+		// Cleanup must not ride the caller's expired context.
+		return err
+	}
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 	fb.unmatched = append(fb.unmatched, opts)
@@ -74,6 +79,9 @@ func (fb *fakeBus) AddSignalChan(ch chan<- *dbus.Signal) {
 	fb.events = append(fb.events, "signal-chan")
 }
 
+// RemoveSignalChan counts releases but deliberately leaves the channel
+// connected, so a test can emit a late signal and prove that nothing is still
+// reading it.
 func (fb *fakeBus) RemoveSignalChan(ch chan<- *dbus.Signal) {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
@@ -101,13 +109,28 @@ func (fb *fakeBus) Close() error {
 	return nil
 }
 
-// emit delivers a signal to every registered channel.
+// emit delivers a signal to every registered channel. Every channel gets every
+// signal, because one Client is one bus connection and godbus fans a signal out
+// to all channels registered on it; the client is expected to filter by request
+// path. Like the real signal handler, emit never blocks on a full buffer - it
+// defers that delivery instead (see signalChannelData.deliver in godbus).
 func (fb *fakeBus) emit(sig *dbus.Signal) {
 	fb.mu.Lock()
 	chans := append([]chan<- *dbus.Signal(nil), fb.chans...)
 	fb.mu.Unlock()
 	for _, ch := range chans {
-		ch <- sig
+		select {
+		case ch <- sig:
+		default:
+			go func(ch chan<- *dbus.Signal) {
+				timer := time.NewTimer(5 * time.Second)
+				defer timer.Stop()
+				select {
+				case ch <- sig:
+				case <-timer.C: // nobody is reading any more
+				}
+			}(ch)
+		}
 	}
 }
 
@@ -191,8 +214,11 @@ func writePNG(t *testing.T, name string, w, h int) (string, string) {
 	return path, "file://" + path
 }
 
+// testClient bounds both timeouts per client: a reaper can then never outlive
+// the test that started it by more than reapTimeout, and nothing is shared
+// between tests.
 func testClient(fb *fakeBus) *Client {
-	return &Client{bus: fb, Timeout: 2 * time.Second}
+	return &Client{bus: fb, Timeout: 2 * time.Second, reapTimeout: 2 * time.Second}
 }
 
 // ==================== handle path / token ====================
@@ -607,13 +633,14 @@ func TestCapture_TimesOut(t *testing.T) {
 		return &dbus.Call{Body: []interface{}{handleFromCall(t, fb, c)}}
 	}
 
-	shortenReapTimeout(t, 100*time.Millisecond)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
+	c := testClient(fb)
+	c.reapTimeout = 100 * time.Millisecond // so the trailing Close is quick to observe
+
 	start := time.Now()
-	_, err := testClient(fb).Capture(ctx, Options{})
+	_, err := c.Capture(ctx, Options{})
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, ErrTimeout) {
@@ -631,7 +658,7 @@ func TestCapture_TimesOut(t *testing.T) {
 	if len(calls) != 1 {
 		t.Errorf("calls = %+v, want only the Screenshot call at this point", calls)
 	}
-	// Once nothing has answered for reapTimeout, the request is closed so its
+	// Once nothing has answered for the reap timeout, the request is closed so its
 	// dialog does not linger.
 	if !eventually(t, 2*time.Second, func() bool {
 		calls, _, _ := fb.snapshot()
@@ -770,6 +797,7 @@ func TestCapture_PortalMissing(t *testing.T) {
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("Capture() error = %v, want ErrUnavailable", err)
 	}
+	assertReleasedSynchronously(t, fb)
 }
 
 func TestCapture_MethodError(t *testing.T) {
@@ -781,6 +809,23 @@ func TestCapture_MethodError(t *testing.T) {
 	_, err := testClient(fb).Capture(context.Background(), Options{})
 	if !errors.Is(err, ErrDenied) {
 		t.Fatalf("Capture() error = %v, want ErrDenied", err)
+	}
+	assertReleasedSynchronously(t, fb)
+
+	// No reaper is listening, so a late response must not delete anything: a
+	// request the portal rejected outright never produced a file, and deleting
+	// on someone else's behalf would be worse than leaking.
+	path, uri := writePNG(t, "notours.png", 1, 1)
+	calls, _, _ := fb.snapshot()
+	fb.emit(&dbus.Signal{
+		Sender: busName,
+		Path:   handleFromCall(t, fb, calls[0]),
+		Name:   requestIface + ".Response",
+		Body:   []interface{}{responseSuccess, map[string]dbus.Variant{"uri": dbus.MakeVariant(uri)}},
+	})
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a late response was acted on after Capture failed outright: %v", err)
 	}
 }
 
@@ -1040,11 +1085,229 @@ func TestCapture_ReapsFileWhenMethodReplyTimesOut(t *testing.T) {
 	}
 }
 
-// shortenReapTimeout makes the background reaper give up quickly so tests do not
-// wait out the production value.
-func shortenReapTimeout(t *testing.T, d time.Duration) {
+// assertReleasedSynchronously checks the subscription was released before
+// Capture returned, which also means no reaper goroutine was left behind.
+func assertReleasedSynchronously(t *testing.T, fb *fakeBus) {
 	t.Helper()
-	previous := reapTimeout
-	reapTimeout = d
-	t.Cleanup(func() { reapTimeout = previous })
+	if _, _, gone := fb.snapshot(); gone != 1 {
+		t.Errorf("released %d signal channels before Capture returned, want 1", gone)
+	}
+	calls, _, _ := fb.snapshot()
+	for _, c := range calls {
+		if c.Method == requestIface+".Close" {
+			t.Errorf("calls = %+v, want no %s.Close: nothing was pending", calls, requestIface)
+		}
+	}
+}
+
+// TestCapture_Concurrent exercises the concurrency the Client doc comment
+// promises: one client, several captures at once, each getting its own image.
+func TestCapture_Concurrent(t *testing.T) {
+	const n = 8
+	dir := t.TempDir()
+	fb := newFakeBus()
+	fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+		if c.Method != screenshotIface+".Screenshot" {
+			return &dbus.Call{}
+		}
+		handle := handleFromCall(t, fb, c)
+		// One file per request, named after its own handle, so a client that
+		// mixed two requests up would read the wrong size or a deleted file.
+		width := 1 + len(handle)%16
+		path := filepath.Join(dir, filepath.Base(string(handle))+".png")
+		f, err := os.Create(path)
+		if err != nil {
+			t.Errorf("create %s: %v", path, err)
+			return &dbus.Call{Err: errors.New("cannot create file")}
+		}
+		if err := png.Encode(f, image.NewRGBA(image.Rect(0, 0, width, 2))); err != nil {
+			t.Errorf("encode %s: %v", path, err)
+		}
+		_ = f.Close()
+
+		go fb.emit(&dbus.Signal{
+			Sender: busName,
+			Path:   handle,
+			Name:   requestIface + ".Response",
+			Body:   []interface{}{responseSuccess, map[string]dbus.Variant{"uri": dbus.MakeVariant("file://" + path)}},
+		})
+		return &dbus.Call{Body: []interface{}{handle}}
+	}
+
+	c := testClient(fb)
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			img, err := c.Capture(context.Background(), Options{})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if img.Bounds().Dy() != 2 || img.Bounds().Dx() < 1 {
+				errs <- fmt.Errorf("unexpected bounds %v", img.Bounds())
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent Capture() error = %v", err)
+	}
+
+	calls, _, gone := fb.snapshot()
+	if len(calls) != n {
+		t.Errorf("recorded %d calls, want %d", len(calls), n)
+	}
+	if gone != n {
+		t.Errorf("released %d signal channels, want %d", gone, n)
+	}
+	// Every request must have used a distinct handle token, and every file must
+	// be gone.
+	tokens := make(map[dbus.ObjectPath]bool, n)
+	for _, call := range calls {
+		h := handleFromCall(t, fb, call)
+		if tokens[h] {
+			t.Errorf("handle %s reused across concurrent captures", h)
+		}
+		tokens[h] = true
+	}
+	left, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	if len(left) != 0 {
+		t.Errorf("%d portal files left behind, want 0", len(left))
+	}
+}
+
+// TestCapture_ReapsFileAfterHandleMismatch covers the legacy branch: the reaper
+// has to listen on the handle the portal returned, not the derived one.
+func TestCapture_ReapsFileAfterHandleMismatch(t *testing.T) {
+	path, uri := writePNG(t, "legacy.png", 2, 2)
+	actual := dbus.ObjectPath("/org/freedesktop/portal/desktop/request/legacy_handle")
+	fb := newFakeBus()
+	fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+		if c.Method != screenshotIface+".Screenshot" {
+			return &dbus.Call{}
+		}
+		return &dbus.Call{Body: []interface{}{actual}}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	if _, err := testClient(fb).Capture(ctx, Options{}); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Capture() error = %v, want ErrTimeout", err)
+	}
+
+	fb.emit(&dbus.Signal{
+		Sender: busName,
+		Path:   actual,
+		Name:   requestIface + ".Response",
+		Body:   []interface{}{responseSuccess, map[string]dbus.Variant{"uri": dbus.MakeVariant(uri)}},
+	})
+
+	if !eventually(t, 2*time.Second, func() bool {
+		_, err := os.Stat(path)
+		return os.IsNotExist(err)
+	}) {
+		t.Errorf("late portal file %s was not deleted after a handle mismatch", path)
+	}
+	// Both match rules must come back off the bus.
+	if !eventually(t, 2*time.Second, func() bool {
+		_, removed := fb.matchCounts()
+		return removed == 2
+	}) {
+		_, removed := fb.matchCounts()
+		t.Errorf("removed %d match rules, want 2", removed)
+	}
+}
+
+// TestClose_WaitsForReaper is the reason Close is not a plain bus.Close:
+// closing the connection closes the signal channels, so a Close racing a reaper
+// would lose the file the portal wrote.
+func TestClose_WaitsForReaper(t *testing.T) {
+	path, uri := writePNG(t, "late.png", 2, 2)
+	fb := newFakeBus()
+	responded := make(chan struct{})
+	fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+		if c.Method != screenshotIface+".Screenshot" {
+			return &dbus.Call{}
+		}
+		handle := handleFromCall(t, fb, c)
+		go func() {
+			// Answers well after Capture gave up, while Close is waiting.
+			time.Sleep(150 * time.Millisecond)
+			fb.emit(&dbus.Signal{
+				Sender: busName,
+				Path:   handle,
+				Name:   requestIface + ".Response",
+				Body:   []interface{}{responseSuccess, map[string]dbus.Variant{"uri": dbus.MakeVariant(uri)}},
+			})
+			close(responded)
+		}()
+		return &dbus.Call{Body: []interface{}{handle}}
+	}
+
+	c := testClient(fb)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := c.Capture(ctx, Options{}); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Capture() error = %v, want ErrTimeout", err)
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	<-responded
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("Close() returned before the reaper deleted %s (stat err = %v)", path, err)
+	}
+	if !fb.closed {
+		t.Error("Close() did not close the bus connection")
+	}
+}
+
+// TestCapture_DeclinesReaperWhileClosing checks a Capture abandoned during Close
+// cleans up itself instead of handing work to a connection that is going away.
+func TestCapture_DeclinesReaperWhileClosing(t *testing.T) {
+	fb := newFakeBus()
+	fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+		if c.Method != screenshotIface+".Screenshot" {
+			return &dbus.Call{}
+		}
+		return &dbus.Call{Body: []interface{}{handleFromCall(t, fb, c)}}
+	}
+
+	c := testClient(fb)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := c.Capture(ctx, Options{}); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Capture() error = %v, want ErrTimeout", err)
+	}
+	assertReleasedSynchronously(t, fb)
+}
+
+// TestCapture_SubscribeErrorFromCancelledContext guards against reporting the
+// caller's own cancellation as an unavailable portal.
+func TestCapture_SubscribeErrorFromCancelledContext(t *testing.T) {
+	fb := newFakeBus()
+	fb.addMatchErr = context.Canceled
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := testClient(fb).Capture(ctx, Options{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Capture() error = %v, want context.Canceled", err)
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Errorf("Capture() error = %v also matches ErrUnavailable", err)
+	}
 }

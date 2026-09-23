@@ -35,7 +35,7 @@ type bus interface {
 	// UniqueName is the connection's own bus name, e.g. ":1.42".
 	UniqueName() string
 	AddMatch(ctx context.Context, opts ...dbus.MatchOption) error
-	RemoveMatch(opts ...dbus.MatchOption) error
+	RemoveMatch(ctx context.Context, opts ...dbus.MatchOption) error
 	AddSignalChan(ch chan<- *dbus.Signal)
 	RemoveSignalChan(ch chan<- *dbus.Signal)
 	Call(ctx context.Context, path dbus.ObjectPath, method string, args ...interface{}) *dbus.Call
@@ -57,8 +57,8 @@ func (s *sessionBus) AddMatch(ctx context.Context, opts ...dbus.MatchOption) err
 	return s.conn.AddMatchSignalContext(ctx, opts...)
 }
 
-func (s *sessionBus) RemoveMatch(opts ...dbus.MatchOption) error {
-	return s.conn.RemoveMatchSignal(opts...)
+func (s *sessionBus) RemoveMatch(ctx context.Context, opts ...dbus.MatchOption) error {
+	return s.conn.RemoveMatchSignalContext(ctx, opts...)
 }
 
 func (s *sessionBus) AddSignalChan(ch chan<- *dbus.Signal)    { s.conn.Signal(ch) }

@@ -36,7 +36,8 @@
 //     already in flight: a request cancelled after 50ms still produced
 //     ~/Pictures/Screenshot.png. Request.Close dismisses the dialog but also
 //     suppresses the Response that carries the uri, so Capture hands the
-//     subscription to a goroutine that waits reapTimeout for a late Response,
+//     subscription to a goroutine that waits out a reap timeout for a late
+//     Response,
 //     deletes the file it names, and only then closes the request.
 //   - The image is the whole virtual screen across all monitors (5760x1287 on
 //     this host), so callers wanting one display or a region must crop.
@@ -48,6 +49,7 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -85,14 +87,17 @@ const DefaultTimeout = 60 * time.Second
 // closeTimeout bounds the best-effort Request.Close sent when we stop waiting.
 const closeTimeout = 2 * time.Second
 
-// reapTimeout bounds how long a goroutine keeps listening after Capture gave up,
-// and so also how long an unanswered dialog is left alone before it is
-// dismissed. Measured on this host: a normal capture answers in 1.2-2.6s, but
-// a request abandoned after 50ms was answered as late as 8s afterwards, and the
+// defaultReapTimeout bounds how long a goroutine keeps listening after Capture
+// gave up, and so also how long an unanswered dialog is left alone before it is
+// dismissed. Measured on this host: a normal capture answers in 1.2-2.6s, but a
+// request abandoned after 50ms was answered as late as 8s afterwards, and the
 // file it wrote had to be reclaimed. 30s covers that with margin; a dialog
 // waiting for the user ends this wait as soon as the user answers it.
-// A variable so tests can shorten it.
-var reapTimeout = 30 * time.Second
+//
+// Dismissing an unanswered dialog sooner would reintroduce that leak, so the
+// trade-off stays as it is until the capture is wired to a real user gesture
+// and the dialog can be judged on screen.
+const defaultReapTimeout = 30 * time.Second
 
 const (
 	busName         = "org.freedesktop.portal.Desktop"
@@ -126,6 +131,15 @@ type Client struct {
 	// Timeout is the deadline applied to a Capture whose context has none.
 	// Zero means DefaultTimeout.
 	Timeout time.Duration
+
+	// reapTimeout overrides defaultReapTimeout when non-zero. Per-client rather
+	// than a package variable so tests can shorten it without racing against
+	// reapers left over from other tests.
+	reapTimeout time.Duration
+
+	mu      sync.Mutex
+	closing bool
+	reapers sync.WaitGroup
 }
 
 // New opens a private session bus connection. Close it when done.
@@ -137,8 +151,36 @@ func New() (*Client, error) {
 	return &Client{bus: &sessionBus{conn: conn}, Timeout: DefaultTimeout}, nil
 }
 
-// Close releases the bus connection.
-func (c *Client) Close() error { return c.bus.Close() }
+// Close releases the bus connection, but first waits for any reaper still
+// trying to delete the file of an abandoned request: closing the connection
+// closes the signal channels, which would lose that file.
+//
+// So Close can block for up to a reap timeout when a capture was abandoned
+// moments earlier, and returns immediately in every other case. A process that
+// exits or is killed before Close returns still leaves the file behind; nothing
+// in this package can cover that.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	c.closing = true
+	c.mu.Unlock()
+
+	// Reapers bound themselves by reapTimeout; the margin covers their own
+	// Request.Close and unsubscribe round trips, each bounded by closeTimeout.
+	// The deadline is belt and braces so Close cannot hang on a stuck reaper.
+	done := make(chan struct{})
+	go func() {
+		c.reapers.Wait()
+		close(done)
+	}()
+	deadline := time.NewTimer(c.reapWait() + 2*closeTimeout)
+	defer deadline.Stop()
+	select {
+	case <-done:
+	case <-deadline.C:
+	}
+
+	return c.bus.Close()
+}
 
 // Version reports the Screenshot interface version the portal implements
 // (2 or later supports the "interactive" option). It returns ErrUnavailable
@@ -150,7 +192,7 @@ func (c *Client) Version(ctx context.Context) (uint32, error) {
 	var v dbus.Variant
 	call := c.bus.Call(ctx, desktopPath, propertiesIface+".Get", screenshotIface, "version")
 	if err := call.Store(&v); err != nil {
-		return 0, callError(ctx, err)
+		return 0, callError(ctx, err, ErrDenied)
 	}
 	version, ok := v.Value().(uint32)
 	if !ok {
@@ -190,10 +232,14 @@ func (c *Client) Capture(ctx context.Context, opts Options) (*image.RGBA, error)
 
 	var rules [][]dbus.MatchOption
 	// unsubscribe is called once, either here or by the reaper goroutine that
-	// takes the subscription over when we abandon the request.
+	// takes the subscription over when we abandon the request. It gets its own
+	// short deadline rather than the caller's context: removing a match rule is
+	// a round trip to the bus daemon, and this also runs after ctx is done.
 	unsubscribe := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		defer cancel()
 		for _, r := range rules {
-			_ = c.bus.RemoveMatch(r...)
+			_ = c.bus.RemoveMatch(ctx, r...)
 		}
 		c.bus.RemoveSignalChan(signals)
 	}
@@ -206,7 +252,7 @@ func (c *Client) Capture(ctx context.Context, opts Options) (*image.RGBA, error)
 
 	match := responseMatch(expected)
 	if err := c.bus.AddMatch(ctx, match...); err != nil {
-		return nil, fmt.Errorf("%w: subscribe to %s: %w", ErrUnavailable, expected, err)
+		return nil, callError(ctx, fmt.Errorf("subscribe to %s: %w", expected, err), ErrUnavailable)
 	}
 	rules = append(rules, match)
 
@@ -216,11 +262,10 @@ func (c *Client) Capture(ctx context.Context, opts Options) (*image.RGBA, error)
 		// A reply that never arrived does not mean the portal dropped the
 		// request, so the same cleanup applies; the request is at the path we
 		// derived, which is why deriving it matters.
-		if ctx.Err() != nil {
+		if ctx.Err() != nil && c.startReaper(expected, signals, unsubscribe) {
 			handedOff = true
-			go c.reapAbandoned(expected, signals, unsubscribe)
 		}
-		return nil, callError(ctx, err)
+		return nil, callError(ctx, err, ErrDenied)
 	}
 
 	// xdg-desktop-portal 0.9 and later returns the path we derived. Older
@@ -231,7 +276,7 @@ func (c *Client) Capture(ctx context.Context, opts Options) (*image.RGBA, error)
 	if handle != expected {
 		late := responseMatch(handle)
 		if err := c.bus.AddMatch(ctx, late...); err != nil {
-			return nil, fmt.Errorf("%w: subscribe to %s: %w", ErrUnavailable, handle, err)
+			return nil, callError(ctx, fmt.Errorf("subscribe to %s: %w", handle, err), ErrUnavailable)
 		}
 		rules = append(rules, late)
 	}
@@ -241,8 +286,9 @@ func (c *Client) Capture(ctx context.Context, opts Options) (*image.RGBA, error)
 		case <-ctx.Done():
 			// Keep listening in the background: the portal finishes the capture
 			// anyway and the file it writes is ours to delete.
-			handedOff = true
-			go c.reapAbandoned(handle, signals, unsubscribe)
+			if c.startReaper(handle, signals, unsubscribe) {
+				handedOff = true
+			}
 			return nil, waitError(ctx.Err())
 
 		case sig, ok := <-signals:
@@ -274,6 +320,33 @@ func (c *Client) withDeadline(ctx context.Context) (context.Context, context.Can
 	return context.WithTimeout(ctx, timeout)
 }
 
+// reapWait is the reap timeout in force for this client.
+func (c *Client) reapWait() time.Duration {
+	if c.reapTimeout <= 0 {
+		return defaultReapTimeout
+	}
+	return c.reapTimeout
+}
+
+// startReaper hands the subscription to a background reaper and reports whether
+// it took it. It declines once Close has begun, because the bus connection is
+// about to go away; the caller then keeps the cleanup and returns as usual.
+func (c *Client) startReaper(handle dbus.ObjectPath, signals <-chan *dbus.Signal, unsubscribe func()) bool {
+	c.mu.Lock()
+	if c.closing {
+		c.mu.Unlock()
+		return false
+	}
+	c.reapers.Add(1)
+	c.mu.Unlock()
+
+	go func() {
+		defer c.reapers.Done()
+		c.reapAbandoned(handle, signals, unsubscribe)
+	}()
+	return true
+}
+
 // closeRequest abandons a pending request. Best effort with its own short
 // deadline: the context that got us here is already done.
 func (c *Client) closeRequest(handle dbus.ObjectPath) {
@@ -291,7 +364,7 @@ func (c *Client) closeRequest(handle dbus.ObjectPath) {
 // the portal still writes the file, and that file is ours to delete. Worse,
 // closing suppresses the Response, which is the only place the file's uri
 // appears. So the order here is listen first, close last - wait up to
-// reapTimeout for a Response and delete whatever file it names, and only when
+// the reap timeout for a Response and delete whatever file it names, and only when
 // nothing answers assume a dialog is sitting there unanswered and dismiss it.
 //
 // If the process exits before a late Response arrives the file is left behind,
@@ -299,7 +372,7 @@ func (c *Client) closeRequest(handle dbus.ObjectPath) {
 func (c *Client) reapAbandoned(handle dbus.ObjectPath, signals <-chan *dbus.Signal, unsubscribe func()) {
 	defer unsubscribe()
 
-	timer := time.NewTimer(reapTimeout)
+	timer := time.NewTimer(c.reapWait())
 	defer timer.Stop()
 
 	for {
@@ -336,10 +409,14 @@ func waitError(err error) error {
 	return fmt.Errorf("portal: screenshot request abandoned: %w", err)
 }
 
-// callError maps a failed method call. The portal is either missing or the
-// deadline expired mid-call; a D-Bus error from a portal that is present means
-// it refused the request.
-func callError(ctx context.Context, err error) error {
+// callError maps a failed D-Bus call. The caller's context comes first: a
+// deadline or cancellation is why the call failed, and reporting it as anything
+// else would make the error match two unrelated sentinels at once. Otherwise a
+// D-Bus error naming a missing service or interface is ErrUnavailable, and
+// anything else falls back to the sentinel the call site nominates - ErrDenied
+// for a request the portal itself rejected, ErrUnavailable for the bus daemon
+// refusing to set up a subscription.
+func callError(ctx context.Context, err error, fallback error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return waitError(ctxErr)
 	}
@@ -347,7 +424,7 @@ func callError(ctx context.Context, err error) error {
 	if errors.As(err, &busErr) && isUnavailableName(busErr.Name) {
 		return fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
-	return fmt.Errorf("%w: %w", ErrDenied, err)
+	return fmt.Errorf("%w: %w", fallback, err)
 }
 
 func isUnavailableName(name string) bool {

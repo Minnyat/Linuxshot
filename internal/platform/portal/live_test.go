@@ -20,12 +20,12 @@ const (
 	manualParentEnv  = "LINUXSHOT_PORTAL_PARENT"  // e.g. x11:0x2a00003; empty is the default
 	manualTimeoutEnv = "LINUXSHOT_PORTAL_TIMEOUT" // Go duration, default 20s
 	manualOutEnv     = "LINUXSHOT_PORTAL_OUT"     // output PNG, must be under /tmp
-	manualReapEnv    = "LINUXSHOT_PORTAL_REAP"    // Go duration, overrides reapTimeout
+	manualReapEnv    = "LINUXSHOT_PORTAL_REAP"    // Go duration, overrides the client reap timeout
 )
 
 // manualGrace keeps a failed manual run alive long enough for the background
 // reaper to delete a screenshot the portal produced after Capture gave up.
-func manualGrace() time.Duration { return reapTimeout + 3*time.Second }
+func manualGrace(c *Client) time.Duration { return c.reapWait() + 3*time.Second }
 
 // TestManual_Capture drives the live xdg-desktop-portal Screenshot interface.
 // It is skipped unless LINUXSHOT_PORTAL_MANUAL=1, so `go test ./...` never
@@ -52,14 +52,13 @@ func TestManual_Capture(t *testing.T) {
 		timeout = d
 	}
 
+	reap := time.Duration(0)
 	if v := os.Getenv(manualReapEnv); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			t.Fatalf("%s=%q: %v", manualReapEnv, v, err)
 		}
-		previous := reapTimeout
-		reapTimeout = d
-		t.Cleanup(func() { reapTimeout = previous })
+		reap = d
 	}
 
 	out := os.Getenv(manualOutEnv)
@@ -76,6 +75,7 @@ func TestManual_Capture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v (is a session bus reachable?)", err)
 	}
+	c.reapTimeout = reap
 	defer func() { _ = c.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -99,8 +99,8 @@ func TestManual_Capture(t *testing.T) {
 			// Capture, so the process has to stay alive for it - otherwise the
 			// portal's file is left in the user's Pictures directory, which is
 			// the thing being verified here.
-			t.Logf("waiting %s for a late response to be reaped", manualGrace())
-			time.Sleep(manualGrace())
+			t.Logf("waiting %s for a late response to be reaped", manualGrace(c))
+			time.Sleep(manualGrace(c))
 		}
 		t.Fatalf("Capture() error = %v [%s] after %s", err, classify(err), elapsed)
 	}
