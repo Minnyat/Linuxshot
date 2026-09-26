@@ -10,6 +10,14 @@ on:
     branches:
       - main
 
+# Queue rather than cancel: once Phase 4 restores the semantic-release
+# job, cancelling an in-progress run here could interrupt a publish
+# mid-flight (tag created, assets not uploaded). Do not flip this to
+# true without also confirming the release job is still disabled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
