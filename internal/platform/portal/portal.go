@@ -9,38 +9,131 @@
 // check, so a denied or cancelled request blocks forever. Capture always applies
 // a deadline and maps every outcome to a sentinel error.
 //
-// Measured behaviour (GNOME 46, xdg-desktop-portal 1.18.4, Screenshot interface
-// version 2, X11 session):
+// Identity and permission (gnome-shell 46.0, xdg-desktop-portal 1.18.4,
+// xdg-desktop-portal-gnome 46.2, gnome-control-center 46.7, systemd 255,
+// Screenshot interface version 2, X11 session).
 //
-//   - parent_window "" from a process that is not the focused window and has no
-//     stored grant is refused with Response code 2 immediately and no dialog is
-//     shown; the journal says "Only the focused app is allowed to show a system
-//     access dialog". So an empty parent_window cannot obtain a first grant -
-//     pass the XID of the focused window instead. Once a grant exists an empty
-//     parent_window does succeed (measured 2.1s), so callers must not treat it
-//     as always-fatal.
-//   - parent_window "x11:0x<xid of the focused window>" is accepted, even when
-//     that window belongs to another application (the journal then logs "Failed
-//     to associate portal window with parent window" and the request still
-//     succeeds). The first such request may show a permission dialog and took
-//     about 5s here; it leaves a stored grant behind, after which requests
-//     answer in 1.2-2.6s with no dialog.
-//   - The grant is keyed to the caller's app identity, which the portal derives
-//     from the caller's systemd scope, not from parent_window. Changing
-//     parent_window does not create a second grant.
+// Evidence is labelled: (host) was read off this machine - binary strings,
+// JS extracted from libshell-14.so, cgroups in /proc; (upstream) is the 46.0 or
+// 1.18.4 source, consistent with this host but not checkable from its stripped
+// binaries; (measured) is an earlier live run.
+//
+//   - Two components compute the two app ids that get compared, and both have
+//     to agree. xdg-desktop-portal derives OURS from the caller's systemd user
+//     unit (host: sd_pid_get_user_unit, the unit must begin with "app-", and
+//     app-<launcher>-<AppID>-<rand>.scope is parsed for <AppID>) and passes it
+//     to the shell. gnome-shell derives only the FOCUSED app, from the focused
+//     window, and compares the two: `${appId}.desktop !== focus_app.id`
+//     (host: accessDialog.js). A mismatch is refused before any dialog appears,
+//     so Capture gets Response code 2.
+//
+//   - The desktop entry therefore only helps when the process was LAUNCHED in a
+//     way that creates that scope, which on this host means gnome-shell (dash,
+//     app grid, search) or gnome-session autostart - the scope name format and
+//     StartTransientUnit live in libgnome-desktop (gnome_start_systemd_scope),
+//     which libshell and gnome-session-binary link and libgio does not (host).
+//     `gio launch` and `gtk-launch` do NOT create an app scope here even though
+//     they honour the entry, so testing with them reproduces the very failure
+//     the entry exists to prevent; a terminal test has to make the scope by
+//     hand, see below.
+//
+//   - Otherwise, started from a terminal the gate fails even with the entry
+//     installed and our own window focused, because the portal reports the
+//     terminal's identity while focus_app is us. Which way it fails depends on
+//     the terminal: one that leaves children in its own app scope yields the
+//     terminal's app id (host, and measured - that is how an early test run
+//     recorded a grant against the terminal), while a VTE terminal moves each
+//     child into vte-spawn-<uuid>.scope, which has no "app-" prefix and yields
+//     an empty id.
+//
+//   - An empty app id is worse than a mismatch, not better: the shell skips the
+//     comparison entirely (`if (appId && ...)`), the dialog is shown with a
+//     generic title, and the answer is stored under the empty id - which
+//     upstream's own comment notes applies to every unsandboxed app whose id
+//     cannot be determined.
+//
+//   - With no entry installed at all and our window focused, focus_app is null
+//     and reading .id throws inside the shell's async handler. Both refusals
+//     reach us the same way: the portal logs "Failed to show access dialog: %s"
+//     and answers code 2, and only the suffix differs - the shell's "Only the
+//     focused app is allowed to show a system access dialog" for a mismatch,
+//     a TypeError for the null focus_app.
+//
+//   - parent_window is passed to the dialog and used for nothing else. The shell
+//     destructures it as an unused parameter and says it may use parentWindow
+//     "in the future", so it neither grants nor denies, and the XID of another
+//     application's window (the journal then logs "Failed to associate portal
+//     window with parent window") changes no outcome and creates no second
+//     grant.
+//
+//   - Interactive: true skips the permission lookup, the dialog and the focus
+//     gate alike: screenshot.c only enters that block when !interactive, and it
+//     stores nothing. The request goes straight to the backend's own capture UI.
+//
+//   - The decision is stored per app id in the permission store (table
+//     "screenshot", id "screenshot"), and a Deny is permanent. PERMISSION_NO
+//     makes every later non-interactive request return code 2 with no dialog,
+//     whoever is focused. PERMISSION_YES is looked up before the dialog, so the
+//     focus gate never runs again and later requests succeed unfocused and with
+//     an empty parent_window (measured 1.2-2.6s).
+//
+//   - There is no Settings UI to undo either decision for an app like ours:
+//     gnome-control-center derives a portal app id only from X-Flatpak or
+//     X-SnapInstanceName (host: those are the only two id keys in the binary,
+//     alongside its "cannot be fully enforced for apps which are not sandboxed"
+//     banner) and hides the Screenshots row for anything else (upstream) -
+//     while the portal's own dialog tells the user the permission "can be
+//     changed at any time from the privacy settings". Recovery is the store
+//     itself: PermissionStore.DeletePermission("screenshot", "screenshot",
+//     <app id>) on org.freedesktop.impl.portal.PermissionStore at
+//     /org/freedesktop/impl/portal/PermissionStore - per app, where the plain
+//     Delete would drop the table entry for every app at once - or
+//     ~/.local/share/flatpak/db/screenshot, which exists even where flatpak
+//     itself is not installed and `flatpak permission-reset` therefore is not.
+//
 //   - The response carries a file: URI. On this host it was a plain path in
 //     ~/Pictures (Screenshot.png, Screenshot-1.png, ...), not a document-portal
-//     path. The caller owns that file and nothing else removes it, so Capture
-//     reads it and deletes it - including on its error paths.
+//     path: the portal only registers a document for a sandboxed caller, and
+//     hands an unsandboxed one the path as-is. The caller owns that file and
+//     nothing else removes it, so Capture reads it and deletes it - including on
+//     its error paths.
+//
 //   - Abandoning a request (deadline or cancellation) does not stop a capture
 //     already in flight: a request cancelled after 50ms still produced
 //     ~/Pictures/Screenshot.png. Request.Close dismisses the dialog but also
 //     suppresses the Response that carries the uri, so Capture hands the
 //     subscription to a goroutine that waits out a reap timeout for a late
-//     Response,
-//     deletes the file it names, and only then closes the request.
+//     Response, deletes the file it names, and only then closes the request.
+//
 //   - The image is the whole virtual screen across all monitors (5760x1287 on
-//     this host), so callers wanting one display or a region must crop.
+//     this host), so callers wanting one display or a region must crop; the
+//     parent platform package's CropDisplayAtCursor does the display case.
+//
+// Testing from a terminal needs that scope created explicitly. Untested here -
+// running the app was outside this task's scope:
+//
+//	systemd-run --user --scope --unit=app-gnome-io.github.minnyat.linuxshot-$RANDOM.scope linuxshot
+//
+// Two rules follow for whoever wires this up:
+//
+//   - The first non-interactive capture must be made while our own window is
+//     mapped and focused, because that is the only moment the gate is judged.
+//     The gate is consulted on every non-interactive request until a decision is
+//     stored, and only an answered dialog stores one, so a refused request
+//     leaves the permission UNSET and changes nothing. Hiding the window first -
+//     the natural screenshot flow - or a first capture from the tray or a hotkey
+//     while another app is focused, both yield ErrDenied with no dialog; with no
+//     focused window at all the shell throws instead. Once PERMISSION_YES is
+//     stored, captures work with the window hidden. Until then, ErrDenied is
+//     worth surfacing as "focus LinuxShot and try again", not as a hard failure.
+//
+//   - A second launch does not re-identify a running instance. Wails'
+//     SingleInstanceLock owns a session bus name; a later launch forwards its
+//     arguments to the owner over D-Bus and exits, so the surviving process
+//     keeps the scope it was started in. Clicking the icon therefore cannot
+//     repair an instance started from a terminal - quit it first. (And if that
+//     forward fails, Wails lets the second instance run instead of exiting, so a
+//     failed forward leaves two processes with two different identities.)
 package portal
 
 import (
@@ -110,8 +203,12 @@ const (
 // Options are the parameters of one screenshot request.
 type Options struct {
 	// ParentWindow is the portal's parent_window identifier: "x11:0x<xid>",
-	// "wayland:<exported handle>", or "" for none. An empty value is refused on
-	// GNOME unless a grant already exists - see the package documentation.
+	// "wayland:<exported handle>", or "" for none. It is forwarded to the
+	// permission dialog and used for nothing else: on GNOME it takes no part in
+	// deciding whether a request is allowed, so an empty value is neither
+	// necessary nor sufficient for a refusal. What decides that is the app id
+	// the portal derives from our systemd unit versus the focused app - see the
+	// package documentation.
 	ParentWindow string
 
 	// Interactive asks the portal to show its own capture UI before returning
@@ -288,8 +385,8 @@ func (c *Client) Capture(ctx context.Context, opts Options) (*image.RGBA, error)
 	// back as a nonsense path instead of an error. Left unchecked we would wait
 	// out the whole deadline for a Response that can never arrive, and report a
 	// timeout for what is really a malformed reply.
-	if !handle.IsValid() {
-		return nil, fmt.Errorf("%w: Screenshot returned %q, which is not an object path", ErrInvalidResponse, handle)
+	if !isRequestHandle(handle) {
+		return nil, fmt.Errorf("%w: Screenshot returned %q, which is not a request path", ErrInvalidResponse, handle)
 	}
 
 	// xdg-desktop-portal 0.9 and later returns the path we derived. Older
@@ -382,7 +479,7 @@ func (c *Client) startReaper(handle dbus.ObjectPath, signals <-chan *dbus.Signal
 // closeRequest abandons a pending request. Best effort with its own short
 // deadline: the context that got us here is already done.
 func (c *Client) closeRequest(handle dbus.ObjectPath) {
-	if !handle.IsValid() {
+	if !isRequestHandle(handle) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
