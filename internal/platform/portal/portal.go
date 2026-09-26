@@ -189,10 +189,15 @@ func (c *Client) Version(ctx context.Context) (uint32, error) {
 	ctx, cancel := c.withDeadline(ctx)
 	defer cancel()
 
-	var v dbus.Variant
 	call := c.bus.Call(ctx, desktopPath, propertiesIface+".Get", screenshotIface, "version")
+	if call.Err != nil {
+		return 0, callError(ctx, call.Err, ErrDenied)
+	}
+	// Store's own errors are decode failures on a reply that did arrive, so they
+	// are a protocol problem, not an absent portal.
+	var v dbus.Variant
 	if err := call.Store(&v); err != nil {
-		return 0, callError(ctx, err, ErrDenied)
+		return 0, fmt.Errorf("%w: version reply: %w", ErrInvalidResponse, err)
 	}
 	version, ok := v.Value().(uint32)
 	if !ok {
@@ -256,16 +261,35 @@ func (c *Client) Capture(ctx context.Context, opts Options) (*image.RGBA, error)
 	}
 	rules = append(rules, match)
 
-	var handle dbus.ObjectPath
 	call := c.bus.Call(ctx, desktopPath, screenshotIface+".Screenshot", opts.ParentWindow, buildOptions(token, opts))
-	if err := call.Store(&handle); err != nil {
+	if call.Err != nil {
 		// A reply that never arrived does not mean the portal dropped the
 		// request, so the same cleanup applies; the request is at the path we
 		// derived, which is why deriving it matters.
 		if ctx.Err() != nil && c.startReaper(expected, signals, unsubscribe) {
 			handedOff = true
 		}
-		return nil, callError(ctx, err, ErrDenied)
+		return nil, callError(ctx, call.Err, ErrDenied)
+	}
+
+	// A reply arrived; anything Store rejects is a decode failure, which makes
+	// this a portal speaking a protocol we do not understand rather than a
+	// missing one. No reaper is started here, unlike the branch above: there the
+	// spec still guarantees the request lives at the derived path, whereas a
+	// portal that answers Screenshot with the wrong signature has already broken
+	// that guarantee, so listening on a path it may not be using would only hold
+	// a subscription open for nothing.
+	var handle dbus.ObjectPath
+	if err := call.Store(&handle); err != nil {
+		return nil, fmt.Errorf("%w: Screenshot reply: %w", ErrInvalidResponse, err)
+	}
+	// Store alone is not enough: an object path is a string type, and godbus
+	// converts any convertible value into it, so a reply carrying a number comes
+	// back as a nonsense path instead of an error. Left unchecked we would wait
+	// out the whole deadline for a Response that can never arrive, and report a
+	// timeout for what is really a malformed reply.
+	if !handle.IsValid() {
+		return nil, fmt.Errorf("%w: Screenshot returned %q, which is not an object path", ErrInvalidResponse, handle)
 	}
 
 	// xdg-desktop-portal 0.9 and later returns the path we derived. Older
@@ -423,11 +447,13 @@ func waitError(err error) error {
 // failed, and reporting it as anything else would make the error match two
 // unrelated sentinels at once.
 //
-// Then, a reply that is not a dbus.Error at all never came from a peer: the
-// transport failed, which godbus reports as dbus.ErrClosed or a raw io/net
-// error. The portal never saw the request, so that is ErrUnavailable - the same
-// sentinel the signal-wait branch returns for a closed connection, so one event
-// cannot yield two answers depending on where Capture happened to be.
+// Then, an error that is not a dbus.Error is a transport failure: godbus reports
+// those as dbus.ErrClosed or a raw io/net error, meaning the request never
+// reached the portal. That is ErrUnavailable - the same sentinel the signal-wait
+// branch returns for a closed connection, so one event cannot yield two answers
+// depending on where Capture happened to be. Call sites must pass only Call.Err
+// here: a decode error from Call.Store is also a plain error, but it comes from
+// a reply that did arrive and belongs to ErrInvalidResponse instead.
 //
 // Only a genuine dbus.Error is left. A name meaning "nothing is there" is
 // ErrUnavailable; anything else is a peer rejecting us, and the sentinel for
@@ -438,7 +464,10 @@ func callError(ctx context.Context, err error, fallback error) error {
 		return waitError(ctxErr)
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		// The call carried a context error of its own while ours is still live.
+		// Defensive, and unreachable with godbus v5.1.0: it only finalizes a call
+		// with a context error taken from the context passed to CallWithContext,
+		// which is the one checked above. Kept so a future version that carries
+		// someone else's context error cannot turn it into ErrUnavailable.
 		return waitError(err)
 	}
 

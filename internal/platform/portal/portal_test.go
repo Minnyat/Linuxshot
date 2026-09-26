@@ -1509,3 +1509,82 @@ func TestClose_DeclinesNewReaperWhileWaiting(t *testing.T) {
 		t.Error("Close() did not close the bus connection")
 	}
 }
+
+// TestCapture_MalformedReply covers a reply that arrived but does not decode: a
+// portal speaking a protocol we do not understand. It must not read as "no
+// portal on the bus", which is what a caller falling back to another capture
+// backend would branch on.
+func TestCapture_MalformedReply(t *testing.T) {
+	fb := newFakeBus()
+	fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+		if c.Method != screenshotIface+".Screenshot" {
+			return &dbus.Call{}
+		}
+		return &dbus.Call{Body: []interface{}{uint32(7)}} // not an object path
+	}
+
+	start := time.Now()
+	_, err := testClient(fb).Capture(context.Background(), Options{})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("Capture() error = %v, want ErrInvalidResponse", err)
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Errorf("Capture() error = %v also matches ErrUnavailable", err)
+	}
+	if errors.Is(err, ErrDenied) {
+		t.Errorf("Capture() error = %v also matches ErrDenied", err)
+	}
+	if errors.Is(err, ErrTimeout) {
+		t.Errorf("Capture() error = %v also matches ErrTimeout", err)
+	}
+	// It must fail on the reply, not wait out the deadline for a Response that
+	// can never arrive on a path the portal never created.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Capture() took %s, want it to reject the reply immediately", elapsed)
+	}
+	assertReleasedSynchronously(t, fb)
+}
+
+func TestCapture_EmptyReply(t *testing.T) {
+	fb := newFakeBus()
+	fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+		return &dbus.Call{Body: []interface{}{}}
+	}
+
+	_, err := testClient(fb).Capture(context.Background(), Options{})
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("Capture() error = %v, want ErrInvalidResponse", err)
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Errorf("Capture() error = %v also matches ErrUnavailable", err)
+	}
+}
+
+func TestVersion_MalformedReply(t *testing.T) {
+	tests := []struct {
+		name string
+		body []interface{}
+	}{
+		{name: "empty reply", body: []interface{}{}},
+		{name: "too many values", body: []interface{}{dbus.MakeVariant(uint32(2)), dbus.MakeVariant(uint32(3))}},
+		{name: "not a variant", body: []interface{}{"2"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fb := newFakeBus()
+			fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+				return &dbus.Call{Body: tt.body}
+			}
+
+			_, err := testClient(fb).Version(context.Background())
+			if !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("Version() error = %v, want ErrInvalidResponse", err)
+			}
+			if errors.Is(err, ErrUnavailable) {
+				t.Errorf("Version() error = %v also matches ErrUnavailable", err)
+			}
+		})
+	}
+}
