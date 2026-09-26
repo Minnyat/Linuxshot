@@ -6,6 +6,7 @@ The structure is:
 
 * bin - Output directory
 * darwin - macOS specific files
+* linux - Linux specific files
 * windows - Windows specific files
 
 ## Mac
@@ -33,3 +34,10 @@ build with `wails build`.
 - `info.json` - Application details used for Windows builds. The data here will be used by the Windows installer,
   as well as the application itself (right click the exe -> properties -> details)
 - `wails.exe.manifest` - The main application manifest file.
+
+## Linux
+
+The `linux` directory holds the desktop entry every Linux channel must install,
+and `linux/README.md` explains why its file name and `StartupWMClass` are part
+of the app's identity rather than cosmetics. Wails does not consume these files
+during `wails build`; packaging does.

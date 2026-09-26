@@ -1,0 +1,36 @@
+# LinuxShot desktop entry. Two things in this file are identity, not cosmetics.
+#
+# 1. The file name. It must stay io.github.minnyat.linuxshot.desktop in every
+#    channel (AppImage, .deb, .rpm, Flatpak, tarball, manual install), matching
+#    singleInstanceID in main.go. gnome-shell's window tracker prefers a
+#    StartupWMClass match, but it also falls back to matching a desktop file
+#    named <wmclass>.desktop - so a channel that ships this entry as
+#    linuxshot.desktop appears to work while the portal records the
+#    screen-capture permission against app id "linuxshot" instead. A user with
+#    two channels installed then gets a second permission prompt and a second
+#    entry in GNOME Settings' app permission list, and revoking one leaves the
+#    other granted. One id, every channel.
+#
+# 2. StartupWMClass=linuxshot - exact, lowercase. Measured on GNOME 46.2: the
+#    Wails window carries WM_CLASS = "linuxshot", "Linuxshot" (from
+#    g_set_prgname("linuxshot"), which Wails sets from the Linux ProgramName
+#    option in main.go) and no _GTK_APPLICATION_ID, and shell-window-tracker
+#    matches StartupWMClass against the WM_CLASS instance name first and
+#    case-sensitively. Without this line the shell cannot map our window to
+#    this file, so xdg-desktop-portal's focused-app check does not see us as
+#    the focused app: a first, non-interactive Screenshot request is refused,
+#    and any grant that is recorded belongs to whichever app the shell does
+#    consider focused (an earlier test run left one on the terminal).
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=LinuxShot
+GenericName=Screenshot Tool
+Comment=Capture your screen, annotate it, and share the result
+Exec=linuxshot
+Icon=io.github.minnyat.linuxshot
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=screenshot;screen;capture;snip;snapshot;annotate;region;print screen;
+StartupNotify=true
+StartupWMClass=linuxshot
