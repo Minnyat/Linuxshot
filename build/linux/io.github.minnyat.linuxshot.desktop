@@ -1,34 +1,37 @@
 # LinuxShot desktop entry. Two things in this file are identity, not cosmetics,
-# and getting either wrong breaks the GNOME screen-capture permission.
+# and getting either wrong breaks the GNOME screen-capture permission. See
+# build/linux/README.md for the mechanism and for how to test it.
 #
-# 1. The file name. The portal derives our app id from the systemd user unit we
-#    run in, and launching through this entry puts us in
-#    app-gnome-io.github.minnyat.linuxshot-<pid>.scope - so the app id follows
-#    THIS FILE'S NAME. It must stay io.github.minnyat.linuxshot.desktop in every
-#    channel (AppImage, .deb, .rpm, Flatpak, tarball, autostart), matching
-#    singleInstanceID in main.go. A channel that ships the same content as
-#    linuxshot.desktop yields app id "linuxshot" instead: a second permission
+# 1. The file name. xdg-desktop-portal derives our app id from the systemd user
+#    unit we run in, and a launch by gnome-shell or gnome-session autostart puts
+#    us in app-gnome-io.github.minnyat.linuxshot-<pid>.scope - so the app id
+#    follows THIS FILE'S NAME. It must stay io.github.minnyat.linuxshot.desktop
+#    in every channel (AppImage, .deb, .rpm, Flatpak, tarball, autostart),
+#    matching singleInstanceID in main.go. A channel that ships the same content
+#    as linuxshot.desktop yields app id "linuxshot" instead: a second permission
 #    prompt, a second stored permission, and revoking one leaves the other.
-#    Worse, if BOTH entries are ever installed, gnome-shell 46 resolves the
+#    Worse, if BOTH entries are ever installed, gnome-shell resolves the
 #    StartupWMClass "linuxshot" to the entry whose own id matches it
-#    (startup_wm_class_is_exact_match in shell-app-system.c), i.e. to
+#    (startup_wm_class_is_exact_match, shell-app-system.c), i.e. to
 #    linuxshot.desktop - so an instance launched from the correct entry has
 #    portal id io.github.minnyat.linuxshot while the shell calls the focused
 #    window linuxshot, and the request is refused outright. Never ship a second
 #    entry carrying StartupWMClass=linuxshot.
 #
-# 2. StartupWMClass=linuxshot - exact, lowercase. Measured on gnome-shell 46.0:
-#    our window carries WM_CLASS = "linuxshot", "Linuxshot" (from
-#    g_set_prgname("linuxshot"), which Wails sets from the Linux ProgramName
-#    option in main.go) and no _GTK_APPLICATION_ID. The shell looks the window's
-#    WM_CLASS up in a plain string-keyed table of StartupWMClass values, so the
-#    match is case-sensitive and it is the lowercase instance part that matches.
-#    Without it the shell cannot map our window to this entry, so it does not
-#    consider us the focused app and xdg-desktop-portal refuses the request.
+# 2. StartupWMClass=linuxshot - exact, lowercase. Our window carries
+#    WM_CLASS = "linuxshot", "Linuxshot" (from g_set_prgname("linuxshot"), which
+#    Wails sets from the Linux ProgramName option in main.go) and no
+#    _GTK_APPLICATION_ID. The shell looks the window's WM_CLASS up in a
+#    string-keyed table of StartupWMClass values, so the match is case-sensitive
+#    and it is the lowercase instance part that matches. Without it the shell
+#    cannot map our window to this entry, so it does not consider us the focused
+#    app and xdg-desktop-portal refuses the request.
 #
-# StartupNotify is false on purpose: with minimize-to-tray enabled main.go
-# starts with no window mapped, and a startup-notification sequence that nothing
-# completes leaves the shell showing a launch spinner until it times out.
+# StartupNotify is false because nothing here needs it: GTK completes the shell's
+# startup sequence on our first window map either way (Wails maps the toplevel
+# synchronously, before the hide that minimize-to-tray queues), so the key only
+# controls launch feedback - which with minimize-to-tray would point at a window
+# that immediately disappears.
 [Desktop Entry]
 Type=Application
 Version=1.0
