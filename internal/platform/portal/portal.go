@@ -9,25 +9,45 @@
 // check, so a denied or cancelled request blocks forever. Capture always applies
 // a deadline and maps every outcome to a sentinel error.
 //
-// Measured behaviour (GNOME 46, xdg-desktop-portal 1.18.4, Screenshot interface
-// version 2, X11 session):
+// Measured behaviour (GNOME 46.2, xdg-desktop-portal 1.18.4, Screenshot
+// interface version 2, X11 session):
 //
-//   - parent_window "" from a process that is not the focused window and has no
-//     stored grant is refused with Response code 2 immediately and no dialog is
-//     shown; the journal says "Only the focused app is allowed to show a system
-//     access dialog". So an empty parent_window cannot obtain a first grant -
-//     pass the XID of the focused window instead. Once a grant exists an empty
-//     parent_window does succeed (measured 2.1s), so callers must not treat it
-//     as always-fatal.
-//   - parent_window "x11:0x<xid of the focused window>" is accepted, even when
-//     that window belongs to another application (the journal then logs "Failed
-//     to associate portal window with parent window" and the request still
-//     succeeds). The first such request may show a permission dialog and took
-//     about 5s here; it leaves a stored grant behind, after which requests
-//     answer in 1.2-2.6s with no dialog.
-//   - The grant is keyed to the caller's app identity, which the portal derives
-//     from the caller's systemd scope, not from parent_window. Changing
-//     parent_window does not create a second grant.
+//   - What gates a first, non-interactive request is the identity of the focused
+//     app, not parent_window. gnome-shell's accessDialog.js compares the app id
+//     the shell derives for the calling process against the app the shell
+//     considers focused, and refuses to show the dialog when they differ. It
+//     does not consult the parent_window we send at all - its own comment says
+//     it may use parentWindow "in the future". The refusal is Response code 2,
+//     immediately and with no dialog; the journal says "Only the focused app is
+//     allowed to show a system access dialog".
+//   - Counting as the focused app therefore depends on the shell being able to
+//     map our window to a desktop entry. That is what
+//     build/linux/io.github.minnyat.linuxshot.desktop and its
+//     StartupWMClass=linuxshot exist for: the entry's file id is the app id the
+//     portal records the permission under, and StartupWMClass is how the shell
+//     ties our window (WM_CLASS instance "linuxshot", from
+//     g_set_prgname("linuxshot")) to that entry. With no such entry installed
+//     the shell has no app id for us, our own window being focused does not
+//     make us the focused app, and a grant obtained in that state is recorded
+//     against whichever app the shell did consider focused instead.
+//   - parent_window only parents the dialog. An empty one, or the XID of a
+//     window belonging to another application (the journal then logs "Failed to
+//     associate portal window with parent window"), changes nothing about
+//     whether the request is allowed and does not create a second grant. Sending
+//     the focused window's XID is still worth doing for dialog placement, but it
+//     buys no permission.
+//   - Interactive: true bypasses all of that - the stored permission, the dialog
+//     and the focus check alike - because xdg-desktop-portal routes an
+//     interactive request straight to the compositor's own screenshot UI
+//     (screenshot.c:219). It needs no grant and leaves none behind.
+//   - The decision is stored, and a Deny is permanent. One Deny writes
+//     PERMISSION_NO to the portal's permission store, after which every
+//     non-interactive request returns Response code 2 with no dialog, whoever is
+//     focused; the user's only way back is GNOME Settings' app permission UI,
+//     which edits that same store. A grant writes PERMISSION_YES and is checked
+//     before the focus gate ever runs, so later requests succeed with no dialog
+//     (measured 1.2-2.6s) even from an unfocused process and with an empty
+//     parent_window.
 //   - The response carries a file: URI. On this host it was a plain path in
 //     ~/Pictures (Screenshot.png, Screenshot-1.png, ...), not a document-portal
 //     path. The caller owns that file and nothing else removes it, so Capture
@@ -110,8 +130,10 @@ const (
 // Options are the parameters of one screenshot request.
 type Options struct {
 	// ParentWindow is the portal's parent_window identifier: "x11:0x<xid>",
-	// "wayland:<exported handle>", or "" for none. An empty value is refused on
-	// GNOME unless a grant already exists - see the package documentation.
+	// "wayland:<exported handle>", or "" for none. It only parents the dialog:
+	// on GNOME it is not what decides whether a request is allowed, so an empty
+	// value is neither necessary nor sufficient for a refusal - see the package
+	// documentation.
 	ParentWindow string
 
 	// Interactive asks the portal to show its own capture UI before returning
