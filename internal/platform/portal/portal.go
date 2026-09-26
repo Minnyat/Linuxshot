@@ -310,8 +310,8 @@ func (c *Client) Capture(ctx context.Context, opts Options) (*image.RGBA, error)
 	// back as a nonsense path instead of an error. Left unchecked we would wait
 	// out the whole deadline for a Response that can never arrive, and report a
 	// timeout for what is really a malformed reply.
-	if !handle.IsValid() {
-		return nil, fmt.Errorf("%w: Screenshot returned %q, which is not an object path", ErrInvalidResponse, handle)
+	if !isRequestHandle(handle) {
+		return nil, fmt.Errorf("%w: Screenshot returned %q, which is not a request path", ErrInvalidResponse, handle)
 	}
 
 	// xdg-desktop-portal 0.9 and later returns the path we derived. Older
@@ -404,7 +404,7 @@ func (c *Client) startReaper(handle dbus.ObjectPath, signals <-chan *dbus.Signal
 // closeRequest abandons a pending request. Best effort with its own short
 // deadline: the context that got us here is already done.
 func (c *Client) closeRequest(handle dbus.ObjectPath) {
-	if !handle.IsValid() {
+	if !isRequestHandle(handle) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)

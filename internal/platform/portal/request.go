@@ -98,6 +98,16 @@ func requestPath(uniqueName, token string) (dbus.ObjectPath, error) {
 	return dbus.ObjectPath("/org/freedesktop/portal/desktop/request/" + sender + "/" + token), nil
 }
 
+// isRequestHandle reports whether p can be the object path of a portal Request.
+// dbus.ObjectPath.IsValid is not enough on its own: an object path is a string
+// type, so godbus converts whatever a reply carries into one, and a numeric body
+// becomes a one-rune path - rune 47 is "/", the root path, which IsValid
+// accepts. No Request lives at the root, and a handle must have at least one
+// path element, so "/" is as malformed as "\a" is.
+func isRequestHandle(p dbus.ObjectPath) bool {
+	return p.IsValid() && p != "/"
+}
+
 // isPathElement reports whether s can be one element of a D-Bus object path:
 // non-empty, and only [A-Za-z0-9_].
 func isPathElement(s string) bool {

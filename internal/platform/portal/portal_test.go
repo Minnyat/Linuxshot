@@ -1515,36 +1515,75 @@ func TestClose_DeclinesNewReaperWhileWaiting(t *testing.T) {
 // portal on the bus", which is what a caller falling back to another capture
 // backend would branch on.
 func TestCapture_MalformedReply(t *testing.T) {
-	fb := newFakeBus()
-	fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
-		if c.Method != screenshotIface+".Screenshot" {
-			return &dbus.Call{}
-		}
-		return &dbus.Call{Body: []interface{}{uint32(7)}} // not an object path
+	// godbus converts a numeric body into the object path's string type without
+	// complaining, so each of these arrives as a path Store accepted.
+	tests := []struct {
+		name string
+		body []interface{}
+	}{
+		// Converts to "\a".
+		{name: "number that is not a path", body: []interface{}{uint32(7)}},
+		// Converts to "/": a valid object path, but no Request lives at the
+		// root, so waiting for a Response there could only ever time out.
+		{name: "number that converts to the root path", body: []interface{}{uint32(47)}},
+		{name: "root path", body: []interface{}{dbus.ObjectPath("/")}},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fb := newFakeBus()
+			fb.onCall = func(fb *fakeBus, c fakeCall) *dbus.Call {
+				if c.Method != screenshotIface+".Screenshot" {
+					return &dbus.Call{}
+				}
+				return &dbus.Call{Body: tt.body}
+			}
 
-	start := time.Now()
-	_, err := testClient(fb).Capture(context.Background(), Options{})
-	elapsed := time.Since(start)
+			start := time.Now()
+			_, err := testClient(fb).Capture(context.Background(), Options{})
+			elapsed := time.Since(start)
 
-	if !errors.Is(err, ErrInvalidResponse) {
-		t.Fatalf("Capture() error = %v, want ErrInvalidResponse", err)
+			if !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("Capture() error = %v, want ErrInvalidResponse", err)
+			}
+			if errors.Is(err, ErrUnavailable) {
+				t.Errorf("Capture() error = %v also matches ErrUnavailable", err)
+			}
+			if errors.Is(err, ErrDenied) {
+				t.Errorf("Capture() error = %v also matches ErrDenied", err)
+			}
+			if errors.Is(err, ErrTimeout) {
+				t.Errorf("Capture() error = %v also matches ErrTimeout", err)
+			}
+			// It must fail on the reply, not wait out the deadline for a Response
+			// that can never arrive on a path the portal never created.
+			if elapsed > 500*time.Millisecond {
+				t.Errorf("Capture() took %s, want it to reject the reply immediately", elapsed)
+			}
+			assertReleasedSynchronously(t, fb)
+		})
 	}
-	if errors.Is(err, ErrUnavailable) {
-		t.Errorf("Capture() error = %v also matches ErrUnavailable", err)
+}
+
+func TestIsRequestHandle(t *testing.T) {
+	tests := []struct {
+		handle dbus.ObjectPath
+		want   bool
+	}{
+		{handle: "/org/freedesktop/portal/desktop/request/1_42/tok", want: true},
+		{handle: "/x", want: true},
+		{handle: "/", want: false}, // valid object path, but never a Request
+		{handle: "", want: false},
+		{handle: "\a", want: false}, // what uint32(7) converts to
+		{handle: "no/slash", want: false},
+		{handle: "/trailing/", want: false},
 	}
-	if errors.Is(err, ErrDenied) {
-		t.Errorf("Capture() error = %v also matches ErrDenied", err)
+	for _, tt := range tests {
+		t.Run(string(tt.handle), func(t *testing.T) {
+			if got := isRequestHandle(tt.handle); got != tt.want {
+				t.Errorf("isRequestHandle(%q) = %v, want %v", tt.handle, got, tt.want)
+			}
+		})
 	}
-	if errors.Is(err, ErrTimeout) {
-		t.Errorf("Capture() error = %v also matches ErrTimeout", err)
-	}
-	// It must fail on the reply, not wait out the deadline for a Response that
-	// can never arrive on a path the portal never created.
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("Capture() took %s, want it to reject the reply immediately", elapsed)
-	}
-	assertReleasedSynchronously(t, fb)
 }
 
 func TestCapture_EmptyReply(t *testing.T) {
@@ -1569,7 +1608,9 @@ func TestVersion_MalformedReply(t *testing.T) {
 	}{
 		{name: "empty reply", body: []interface{}{}},
 		{name: "too many values", body: []interface{}{dbus.MakeVariant(uint32(2)), dbus.MakeVariant(uint32(3))}},
-		{name: "not a variant", body: []interface{}{"2"}},
+		// godbus wraps a bare value in a variant when storing into one, so
+		// this reaches the check on the variant's own type, not Store.
+		{name: "version is a string, not a uint32", body: []interface{}{"2"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
